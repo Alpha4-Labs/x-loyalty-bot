@@ -1,0 +1,44 @@
+name = "twitter-loyalty-bot"
+main = "src/index.js"
+compatibility_date = "2024-11-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Custom domain configuration (Optional)
+# [[routes]]
+# pattern = "x-bot.your-domain.com/*"
+# zone_name = "your-domain.com"
+
+# Service bindings (Optional - for advanced setups)
+# [[services]]
+# binding = "EVENT_HANDLER"
+# service = "loyalteez-event-handler"
+
+# Key-value storage for deduplication
+[[kv_namespaces]]
+binding = "TWITTER_BOT_KV"
+id = "your_kv_namespace_id"
+
+# Scheduled trigger for polling (every 15 mins)
+[triggers]
+crons = ["*/15 * * * *"]
+
+[vars]
+# Loyalteez Brand ID (Wallet Address)
+BRAND_ID = "0x_your_brand_wallet_address"
+# API URL
+LOYALTEEZ_API_URL = "https://api.loyalteez.app"
+# Twitter Handle to track (without @)
+TWITTER_HANDLE = "your_brand_handle"
+
+# ============================================
+# SECRETS - Set via `wrangler secret put ...`
+# NEVER commit actual values to git!
+# ============================================
+# wrangler secret put TWITTER_BEARER_TOKEN
+# 
+# OR for full OAuth (if needed for write operations):
+# wrangler secret put TWITTER_API_KEY
+# wrangler secret put TWITTER_API_SECRET
+# wrangler secret put TWITTER_ACCESS_TOKEN
+# wrangler secret put TWITTER_ACCESS_SECRET
+

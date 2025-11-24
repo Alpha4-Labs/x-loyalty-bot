@@ -18,22 +18,19 @@ service = "loyalteez-event-handler"
 binding = "TWITTER_BOT_KV"
 id = "2ccf358b408844289785f1ff3e272bf1"
 
-
 # Scheduled trigger for polling (every 15 mins)
 [triggers]
 crons = ["*/15 * * * *"]
 
 [vars]
-# Loyalteez Brand ID (Wallet Address) - Replace with your brand address
-BRAND_ID = "0x..."
+# Loyalteez Brand ID (Wallet Address) - Configure in Cloudflare Dashboard
+BRAND_ID = "0x_configure_in_dashboard"
 # API URL
 LOYALTEEZ_API_URL = "https://api.loyalteez.app"
-# Twitter Handle to track (default)
-TWITTER_HANDLE = "loyalteez"
+# Twitter Handle to track - Configure in Cloudflare Dashboard
+TWITTER_HANDLE = "configure_in_dashboard"
 
-# Secrets must be set via `wrangler secret put ...`
-# TWITTER_API_KEY
-# TWITTER_API_SECRET
-# TWITTER_ACCESS_TOKEN
-# TWITTER_ACCESS_SECRET
-# TWITTER_BEARER_TOKEN
+# ============================================
+# SECRETS - Set via Cloudflare Dashboard or CLI
+# wrangler secret put TWITTER_BEARER_TOKEN
+# ============================================
