@@ -1,0 +1,20 @@
+{
+  "name": "twitter-loyalty-bot",
+  "version": "1.0.0",
+  "description": "A Cloudflare Worker that rewards X (Twitter) engagement with LTZ tokens.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "author": "Loyalteez",
+  "license": "MIT",
+  "dependencies": {
+    "twitter-api-v2": "^1.15.0"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
