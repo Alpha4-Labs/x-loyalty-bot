@@ -28,7 +28,7 @@ BRAND_ID = "0x_your_brand_wallet_address"
 # API URL
 LOYALTEEZ_API_URL = "https://api.loyalteez.app"
 # Supabase connection (for reading config from Partner Portal)
-SUPABASE_URL = "https://lrvnppgnngnkstouozzk.supabase.co"
+SUPABASE_URL = "https://xcyhefjogmgttegqhhyi.supabase.co"
 
 # ============================================
 # SECRETS - Set via `wrangler secret put ...`
