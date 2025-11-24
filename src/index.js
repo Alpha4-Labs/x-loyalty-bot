@@ -2,7 +2,7 @@
  * Twitter/X Loyalty Bot - Cloudflare Worker
  * 
  * Polls Twitter API for brand mentions and rewards users with LTZ tokens.
- * Uses native fetch() for Cloudflare Workers compatibility.
+ * Reads configuration from Supabase (Partner Portal) for single source of truth.
  */
 
 export default {
@@ -12,9 +12,12 @@ export default {
     
     // Health check endpoint
     if (url.pathname === '/health') {
+      const config = await this.getBrandConfig(env);
       return new Response(JSON.stringify({ 
         status: 'ok',
         service: 'twitter-loyalty-bot',
+        brand_id: env.BRAND_ID,
+        twitter_handle: config?.twitterHandle || 'not configured',
         timestamp: new Date().toISOString()
       }), {
         headers: { 'Content-Type': 'application/json' }
@@ -36,7 +39,19 @@ export default {
       }
     }
 
-    return new Response("🐦 Twitter Loyalty Bot Active\n\nEndpoints:\n- GET /health - Health check\n- POST /trigger - Manual poll trigger", { 
+    // Config check endpoint
+    if (url.pathname === '/config') {
+      const config = await this.getBrandConfig(env);
+      return new Response(JSON.stringify({ 
+        brand_id: env.BRAND_ID,
+        config: config || 'not found',
+        has_bearer_token: !!env.TWITTER_BEARER_TOKEN
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    return new Response("🐦 Twitter Loyalty Bot Active\n\nEndpoints:\n- GET /health - Health check\n- GET /config - View configuration\n- POST /trigger - Manual poll trigger", { 
       status: 200,
       headers: { 'Content-Type': 'text/plain' }
     });
@@ -48,6 +63,58 @@ export default {
     await this.pollTwitterMentions(env);
   },
 
+  // Fetch brand configuration from Supabase
+  async getBrandConfig(env) {
+    if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+      console.log("⚠️ Supabase credentials not configured");
+      return null;
+    }
+
+    if (!env.BRAND_ID || env.BRAND_ID === '0x_configure_in_dashboard') {
+      console.log("⚠️ BRAND_ID not configured");
+      return null;
+    }
+
+    try {
+      const brandId = env.BRAND_ID.toLowerCase();
+      const response = await fetch(
+        `${env.SUPABASE_URL}/rest/v1/brand_automation_configs?brand_id=eq.${brandId}&select=config_metadata`,
+        {
+          headers: {
+            'apikey': env.SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${env.SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`❌ Supabase error: ${response.status} - ${errorText}`);
+        return null;
+      }
+
+      const data = await response.json();
+      if (!data || data.length === 0) {
+        console.log(`⚠️ No config found for brand ${brandId}`);
+        return null;
+      }
+
+      const configMetadata = data[0].config_metadata;
+      const twitterHandle = configMetadata?.auth_methods?.twitter;
+
+      console.log(`📋 Loaded config for ${brandId}: Twitter handle = ${twitterHandle || 'not set'}`);
+
+      return {
+        twitterHandle,
+        configMetadata
+      };
+    } catch (error) {
+      console.error(`❌ Error fetching brand config:`, error.message || error);
+      return null;
+    }
+  },
+
   // Main polling logic
   async pollTwitterMentions(env) {
     try {
@@ -57,13 +124,15 @@ export default {
         return;
       }
 
-      // Check if handle is configured
-      const handle = env.TWITTER_HANDLE;
-      if (!handle || handle === 'configure_in_dashboard') {
-        console.log("⚠️ TWITTER_HANDLE not configured. Skipping poll.");
+      // Fetch Twitter handle from Supabase (Partner Portal config)
+      const config = await this.getBrandConfig(env);
+      if (!config || !config.twitterHandle) {
+        console.log("⚠️ Twitter handle not configured in Partner Portal. Skipping poll.");
+        console.log("   → Go to Partner Portal → Settings → Profile → X (Twitter) to set your handle.");
         return;
       }
 
+      const handle = config.twitterHandle;
       console.log(`🔎 Searching mentions for @${handle}...`);
 
       // Step 1: Get User ID for the handle

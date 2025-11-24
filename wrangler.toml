@@ -23,14 +23,15 @@ id = "2ccf358b408844289785f1ff3e272bf1"
 crons = ["*/15 * * * *"]
 
 [vars]
-# Loyalteez Brand ID (Wallet Address) - Configure in Cloudflare Dashboard
-BRAND_ID = "0x_configure_in_dashboard"
+# Loyalteez Brand ID (Wallet Address)
+BRAND_ID = "0xf8964eB6D654659a4935363595db1095474Be22F"
 # API URL
 LOYALTEEZ_API_URL = "https://api.loyalteez.app"
-# Twitter Handle to track - Configure in Cloudflare Dashboard
-TWITTER_HANDLE = "configure_in_dashboard"
+# Supabase connection (reads Twitter handle from Partner Portal config)
+SUPABASE_URL = "https://lrvnppgnngnkstouozzk.supabase.co"
 
 # ============================================
 # SECRETS - Set via Cloudflare Dashboard or CLI
 # wrangler secret put TWITTER_BEARER_TOKEN
+# wrangler secret put SUPABASE_ANON_KEY
 # ============================================
