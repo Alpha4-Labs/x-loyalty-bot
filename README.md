@@ -37,6 +37,11 @@ A Cloudflare Worker integration for Loyalteez that rewards users for engaging wi
    npm run deploy
    ```
 
+5. **Configure Custom Domain** (Optional):
+   - The worker is configured to use `x-demo.loyalteez.app` as a custom domain.
+   - Ensure DNS A/AAAA records are configured in Cloudflare Dashboard.
+   - The route is automatically configured via `wrangler.toml`.
+
 ## Configuration
 
 - `TWITTER_HANDLE`: The brand handle to monitor (without @).

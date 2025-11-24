@@ -3,6 +3,11 @@ main = "src/index.js"
 compatibility_date = "2024-11-23"
 compatibility_flags = ["nodejs_compat"]
 
+# Custom domain configuration
+[[routes]]
+pattern = "x-demo.loyalteez.app/*"
+zone_name = "loyalteez.app"
+
 # Service bindings for worker-to-worker communication
 [[services]]
 binding = "EVENT_HANDLER"
