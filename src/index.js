@@ -39,19 +39,52 @@ export default {
       }
     }
 
+    // Reset high water mark (for testing)
+    if (url.pathname === '/reset' && request.method === 'POST') {
+      try {
+        const config = await this.getBrandConfig(env);
+        if (config?.twitterHandle) {
+          const highWaterKey = `high_water:${config.twitterHandle.toLowerCase()}`;
+          await env.TWITTER_BOT_KV.delete(highWaterKey);
+          return new Response(JSON.stringify({ 
+            success: true, 
+            message: `High water mark reset for @${config.twitterHandle}. Next poll will be treated as first run.` 
+          }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        return new Response(JSON.stringify({ success: false, error: 'No Twitter handle configured' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({ success: false, error: error.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
     // Config check endpoint
     if (url.pathname === '/config') {
       const config = await this.getBrandConfig(env);
+      const supabaseKey = env.SUPABASE_PUBLISH_KEY || env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_SECRET_KEY;
       return new Response(JSON.stringify({ 
         brand_id: env.BRAND_ID,
+        brand_id_lowercase: env.BRAND_ID?.toLowerCase(),
         config: config || 'not found',
-        has_bearer_token: !!env.TWITTER_BEARER_TOKEN
-      }), {
+        has_bearer_token: !!env.TWITTER_BEARER_TOKEN,
+        has_supabase_url: !!env.SUPABASE_URL,
+        has_vite_supabase_secret_key: !!env.VITE_SUPABASE_SECRET_KEY,
+        has_supabase_publish_key: !!env.SUPABASE_PUBLISH_KEY,
+        supabase_key_available: !!supabaseKey,
+        supabase_url: env.SUPABASE_URL || 'NOT SET'
+      }, null, 2), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    return new Response("🐦 Twitter Loyalty Bot Active\n\nEndpoints:\n- GET /health - Health check\n- GET /config - View configuration\n- POST /trigger - Manual poll trigger", { 
+    return new Response("🐦 Twitter Loyalty Bot Active\n\nEndpoints:\n- GET /health - Health check\n- GET /config - View configuration\n- POST /trigger - Manual poll trigger\n- POST /reset - Reset high water mark (for testing)", { 
       status: 200,
       headers: { 'Content-Type': 'text/plain' }
     });
@@ -65,8 +98,14 @@ export default {
 
   // Fetch brand configuration from Supabase
   async getBrandConfig(env) {
-    if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    // Support multiple key naming conventions
+    const supabaseKey = env.SUPABASE_PUBLISH_KEY || env.SUPABASE_ANON_KEY || env.VITE_SUPABASE_SECRET_KEY;
+    
+    if (!env.SUPABASE_URL || !supabaseKey) {
       console.log("⚠️ Supabase credentials not configured");
+      console.log("   SUPABASE_URL:", env.SUPABASE_URL ? "✅" : "❌");
+      console.log("   SUPABASE_PUBLISH_KEY:", env.SUPABASE_PUBLISH_KEY ? "✅" : "❌");
+      console.log("   VITE_SUPABASE_SECRET_KEY:", env.VITE_SUPABASE_SECRET_KEY ? "✅" : "❌");
       return null;
     }
 
@@ -81,8 +120,8 @@ export default {
         `${env.SUPABASE_URL}/rest/v1/brand_automation_configs?brand_id=eq.${brandId}&select=config_metadata`,
         {
           headers: {
-            'apikey': env.SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${env.SUPABASE_ANON_KEY}`,
+            'apikey': supabaseKey,
+            'Authorization': `Bearer ${supabaseKey}`,
             'Content-Type': 'application/json'
           }
         }
@@ -143,21 +182,37 @@ export default {
       }
       console.log(`✅ Found user ID: ${userId}`);
 
-      // Step 2: Search for recent mentions
-      const mentions = await this.searchMentions(env, handle);
-      if (!mentions || mentions.length === 0) {
+      // Step 2: Search for recent mentions (with high water mark)
+      const { tweets, isFirstRun, newestId } = await this.searchMentions(env, handle);
+      
+      if (!tweets || tweets.length === 0) {
         console.log("📭 No new mentions found.");
+        // Still update high water mark if we got a newestId from API meta
+        if (newestId) {
+          await this.updateHighWaterMark(env, handle, newestId);
+        }
         return;
       }
 
-      console.log(`📬 Found ${mentions.length} mentions to process.`);
-
-      // Step 3: Process each mention
-      for (const tweet of mentions) {
-        await this.processTweet(env, tweet, 'tweet_mention');
+      if (isFirstRun) {
+        console.log(`🆕 First run: Processing ${tweets.length} most recent tweets (limited to 3)`);
+      } else {
+        console.log(`📬 Found ${tweets.length} NEW mentions to process.`);
       }
 
-      console.log("✅ Poll complete.");
+      // Step 3: Process each mention
+      let processedCount = 0;
+      for (const tweet of tweets) {
+        const processed = await this.processTweet(env, tweet, 'tweet_mention');
+        if (processed) processedCount++;
+      }
+
+      // Step 4: Update high water mark AFTER successful processing
+      if (newestId) {
+        await this.updateHighWaterMark(env, handle, newestId);
+      }
+
+      console.log(`✅ Poll complete. Processed ${processedCount}/${tweets.length} tweets.`);
 
     } catch (error) {
       console.error("❌ Error in poll:", error.message || error);
@@ -203,12 +258,24 @@ export default {
     return data.data.id;
   },
 
-  // Search for recent mentions
+  // Search for recent mentions (with high water mark to avoid re-processing)
   async searchMentions(env, handle) {
+    // Get the high water mark (last processed tweet ID)
+    const highWaterKey = `high_water:${handle.toLowerCase()}`;
+    const sinceId = await env.TWITTER_BOT_KV.get(highWaterKey);
+    
     // Twitter API v2 search endpoint
     // Note: Basic tier allows recent search (last 7 days)
     const query = encodeURIComponent(`@${handle} -is:retweet`);
-    const url = `https://api.twitter.com/2/tweets/search/recent?query=${query}&max_results=10&tweet.fields=author_id,created_at,text&expansions=author_id`;
+    let url = `https://api.twitter.com/2/tweets/search/recent?query=${query}&max_results=10&tweet.fields=author_id,created_at,text&expansions=author_id`;
+    
+    // Only fetch tweets NEWER than our last processed tweet
+    if (sinceId) {
+      url += `&since_id=${sinceId}`;
+      console.log(`📍 Using high water mark: since_id=${sinceId}`);
+    } else {
+      console.log(`🆕 First run - will only process most recent 3 tweets and set high water mark`);
+    }
 
     const response = await fetch(url, {
       headers: {
@@ -220,90 +287,100 @@ export default {
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`❌ Twitter API error (searchMentions): ${response.status} - ${errorText}`);
-      return [];
+      return { tweets: [], isFirstRun: !sinceId, newestId: null };
     }
 
     const data = await response.json();
-    return data.data || [];
+    const tweets = data.data || [];
+    
+    // Get the newest tweet ID to update high water mark
+    const newestId = data.meta?.newest_id || (tweets.length > 0 ? tweets[0].id : null);
+    
+    return { 
+      tweets: !sinceId && tweets.length > 3 ? tweets.slice(0, 3) : tweets, // Limit first run to 3 tweets
+      isFirstRun: !sinceId, 
+      newestId 
+    };
   },
 
-  // Process a single tweet
+  // Update the high water mark after successful processing
+  async updateHighWaterMark(env, handle, newestId) {
+    if (!newestId) return;
+    const highWaterKey = `high_water:${handle.toLowerCase()}`;
+    await env.TWITTER_BOT_KV.put(highWaterKey, newestId);
+    console.log(`📍 Updated high water mark to: ${newestId}`);
+  },
+
+  // Process a single tweet - returns true if processed, false if skipped
   async processTweet(env, tweet, eventType) {
     const tweetId = tweet.id;
     const authorId = tweet.author_id;
 
-    // Check if already processed
+    // Check if already processed (belt-and-suspenders with high water mark)
     const processedKey = `processed:${tweetId}`;
     const isProcessed = await env.TWITTER_BOT_KV.get(processedKey);
     
     if (isProcessed) {
       console.log(`⏭️ Skipping already processed tweet: ${tweetId}`);
-      return;
+      return false;
     }
 
     const tweetPreview = tweet.text?.substring(0, 50) || 'No text';
     console.log(`🎉 Processing tweet ${tweetId} from user ${authorId}: "${tweetPreview}..."`);
 
     // Send reward event
-    await this.sendRewardEvent(env, authorId, eventType, tweetId);
+    const success = await this.sendRewardEvent(env, authorId, eventType, tweetId);
 
-    // Mark as processed (TTL 7 days to prevent re-processing)
+    // Mark as processed (TTL 30 days to prevent re-processing)
     await env.TWITTER_BOT_KV.put(processedKey, JSON.stringify({
       processed_at: new Date().toISOString(),
-      event_type: eventType
-    }), { expirationTtl: 604800 });
+      event_type: eventType,
+      success: success
+    }), { expirationTtl: 2592000 }); // 30 days
+    
+    return true;
   },
 
-  // Send reward event to Loyalteez Event Handler
+  // Send reward event to Loyalteez Event Handler - returns true on success
   async sendRewardEvent(env, socialId, eventType, referenceId) {
+    // Use same payload format as Discord bot (loyalteez.js)
+    // Twitter users get a synthetic email: twitter_{userId}@loyalteez.app
+    const userEmail = `twitter_${socialId}@loyalteez.app`;
+    
     const payload = {
-      brand_id: env.BRAND_ID,
-      event_type: eventType,
-      user_identifier: `twitter:${socialId}`,
+      brandId: env.BRAND_ID,
+      eventType: eventType,
+      userEmail: userEmail,
+      domain: 'x-demo.loyalteez.app',
       metadata: {
         platform: 'twitter',
-        reference_id: referenceId,
+        twitter_user_id: socialId,
+        tweet_id: referenceId,
         timestamp: new Date().toISOString()
       }
     };
 
     try {
-      // Use service binding if available (faster, no external HTTP)
-      if (env.EVENT_HANDLER) {
-        console.log(`📤 Sending event via service binding...`);
-        const response = await env.EVENT_HANDLER.fetch(
-          new Request("http://internal/process-event", {
-            method: "POST",
-            body: JSON.stringify(payload),
-            headers: { "Content-Type": "application/json" }
-          })
-        );
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`❌ Event Handler error: ${response.status} - ${errorText}`);
-        } else {
-          const result = await response.json();
-          console.log(`✅ Event sent successfully:`, result);
-        }
-      } else {
-        // Fallback to HTTP API
-        console.log(`📤 Sending event via HTTP API...`);
-        const response = await fetch(`${env.LOYALTEEZ_API_URL}/loyalteez-api/process-event`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
+      // Using the same endpoint as Discord bot: /loyalteez-api/manual-event
+      console.log(`📤 Sending event to ${env.LOYALTEEZ_API_URL}/loyalteez-api/manual-event...`);
+      const response = await fetch(`${env.LOYALTEEZ_API_URL}/loyalteez-api/manual-event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
 
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`❌ API error: ${response.status} - ${errorText}`);
-        } else {
-          console.log(`✅ Event sent to API`);
-        }
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`❌ API error: ${response.status} - ${errorText}`);
+        return false;
       }
+      
+      const result = await response.json().catch(() => ({}));
+      console.log(`✅ Event sent successfully`, result.message || '');
+      return true;
     } catch (error) {
       console.error(`❌ Failed to send reward event:`, error.message || error);
+      return false;
     }
   }
 };

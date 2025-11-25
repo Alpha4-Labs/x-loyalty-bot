@@ -7,7 +7,8 @@ A serverless Twitter integration built on Cloudflare Workers that rewards commun
 - **Serverless Architecture**: Runs entirely on Cloudflare Workers (no paid VPS required).
 - **Automatic Polling**: Scheduled triggers check for new engagements every 15 minutes.
 - **Mention Tracking**: Rewards users who mention your brand's Twitter handle.
-- **Deduplication**: KV storage ensures each tweet is only rewarded once.
+- **Smart Deduplication**: High water mark + KV storage ensures each tweet is only rewarded once.
+- **Partner Portal Integration**: Twitter handle configured in Partner Portal (single source of truth).
 - **Instant Rewards**: Calls Loyalteez Event Handler to mint tokens upon detection.
 
 ## Current Engagement Types
@@ -42,7 +43,7 @@ npm install
 4. Generate a **Bearer Token** (easiest for read-only operations).
 5. Copy the Bearer Token securely.
 
-> **Note**: Basic (Free) tier allows 10,000 tweet reads/month. For higher volume, consider Pro tier.
+> **Note**: Basic (Free) tier allows ~10,000 tweet reads/month and 10 requests per 15-minute window. For higher volume, consider Pro tier ($100/month).
 
 ### 3. Create KV Namespace
 
@@ -69,7 +70,6 @@ id = "your_kv_namespace_id_from_step_3"
 
 [vars]
 BRAND_ID = "0xYourWalletAddress"
-TWITTER_HANDLE = "YourBrandHandle"  # without @
 ```
 
 ### 5. Set Secrets
@@ -77,11 +77,23 @@ TWITTER_HANDLE = "YourBrandHandle"  # without @
 **⚠️ NEVER commit secrets to git!**
 
 ```bash
+# Twitter Bearer Token (from step 2)
 npx wrangler secret put TWITTER_BEARER_TOKEN
-# Paste your Bearer Token when prompted
+
+# Supabase key (get from Loyalteez team)
+npx wrangler secret put SUPABASE_PUBLISH_KEY
 ```
 
-### 6. Deploy
+### 6. Configure Twitter Handle in Partner Portal
+
+1. Go to **Partner Portal** → **Settings** → **Profile**.
+2. In the **Authentication Methods** section, find **Twitter**.
+3. Enter your Twitter handle (without @).
+4. Save the configuration.
+
+> **Important**: The Twitter handle is read from Partner Portal, not from environment variables. This ensures a single source of truth.
+
+### 7. Deploy
 
 ```bash
 npm run deploy
@@ -89,7 +101,7 @@ npm run deploy
 
 The bot will automatically start polling every 15 minutes.
 
-### 7. Configure Events in Partner Portal
+### 8. Configure Events in Partner Portal
 
 1. Go to **Partner Portal** → **Settings** → **Points Distribution**.
 2. Click **Add Event** and select **Tweet Mention** (or other Twitter events).
@@ -103,38 +115,62 @@ The bot will automatically start polling every 15 minutes.
 │  Twitter API    │────▶│  Cloudflare      │────▶│  Loyalteez      │
 │  (Mentions)     │     │  Worker (Cron)   │     │  Event Handler  │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
-                               │
-                               ▼
-                        ┌──────────────────┐
-                        │  KV Store        │
-                        │  (Deduplication) │
+        │                       │                        │
+        │                       ▼                        │
+        │               ┌──────────────────┐             │
+        │               │  KV Store        │             │
+        │               │  (Deduplication) │             │
+        │               └──────────────────┘             │
+        │                       │                        │
+        │                       ▼                        │
+        │               ┌──────────────────┐             │
+        └──────────────▶│  Supabase        │◀────────────┘
+                        │  (Config)        │
                         └──────────────────┘
 ```
 
 1. **Cron Trigger** (every 15 mins): Worker wakes up.
-2. **Fetch Mentions**: Queries Twitter API for recent mentions of your handle.
-3. **Deduplication**: Checks KV store to skip already-processed tweets.
-4. **Reward**: Sends event to Loyalteez Event Handler for token minting.
-5. **Record**: Stores tweet ID in KV to prevent duplicate rewards.
+2. **Load Config**: Fetches Twitter handle from Supabase (Partner Portal).
+3. **Fetch Mentions**: Queries Twitter API for mentions since last poll (high water mark).
+4. **Deduplication**: Skips already-processed tweets using KV store.
+5. **Reward**: Sends event to Loyalteez Event Handler for token minting.
+6. **Record**: Updates high water mark and stores tweet ID in KV.
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Service info and available endpoints |
+| `/health` | GET | Health check with config status |
+| `/config` | GET | Debug endpoint showing configuration |
+| `/trigger` | POST | Manually trigger a poll (for testing) |
+| `/reset` | POST | Reset high water mark (start fresh) |
+
+### Example: Manual Trigger
+
+```bash
+curl -X POST https://your-worker.workers.dev/trigger
+```
+
+### Example: Reset High Water Mark
+
+```bash
+curl -X POST https://your-worker.workers.dev/reset
+```
 
 ## Environment Variables
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `BRAND_ID` | Your Loyalteez wallet address | Yes |
-| `TWITTER_HANDLE` | Twitter handle to monitor (without @) | Yes |
-| `LOYALTEEZ_API_URL` | API endpoint | Yes |
-| `TWITTER_BEARER_TOKEN` | Twitter API Bearer Token (Secret) | Yes |
+| Variable | Description | Required | Where to Set |
+|----------|-------------|----------|--------------|
+| `BRAND_ID` | Your Loyalteez wallet address | Yes | wrangler.toml |
+| `LOYALTEEZ_API_URL` | API endpoint | Yes | wrangler.toml |
+| `SUPABASE_URL` | Supabase instance URL | Yes | wrangler.toml |
+| `TWITTER_BEARER_TOKEN` | Twitter API Bearer Token | Yes | Secret |
+| `SUPABASE_PUBLISH_KEY` | Supabase public key | Yes | Secret |
+
+> **Note**: Twitter handle is configured in Partner Portal, not here.
 
 ## Testing
-
-### Manual Trigger
-
-Visit your worker URL to verify it's running:
-
-```
-https://twitter-loyalty-bot.yourname.workers.dev
-```
 
 ### View Logs
 
@@ -146,9 +182,20 @@ This streams real-time logs from your worker.
 
 ### Test with a Mention
 
-1. Have a test account tweet: `"Testing @YourBrand integration!"`
-2. Wait for the next cron run (up to 15 mins) or trigger manually.
-3. Check logs for processing confirmation.
+1. Configure your Twitter handle in Partner Portal.
+2. Have a test account tweet: `"Testing @YourBrand integration!"`
+3. Either wait for the next cron run (up to 15 mins) or trigger manually:
+   ```bash
+   curl -X POST https://your-worker.workers.dev/trigger
+   ```
+4. Check logs for processing confirmation.
+
+### First Run Behavior
+
+On first deployment (no high water mark), the bot will:
+- Process only the **3 most recent mentions** (to avoid mass-processing old tweets)
+- Set a high water mark for future polls
+- Subsequent polls only fetch tweets newer than the high water mark
 
 ## Customization
 
@@ -161,15 +208,16 @@ Edit `wrangler.toml`:
 crons = ["*/5 * * * *"]  # Every 5 minutes
 ```
 
-> **Warning**: More frequent polling consumes API quota faster.
+> **Warning**: More frequent polling consumes Twitter API quota faster (10 requests per 15 mins on Basic tier).
 
-### Add Custom Event Types
+### Custom Domain
 
-Edit `src/index.js` to add new detection logic:
+Add to `wrangler.toml`:
 
-```javascript
-// Example: Detect quote tweets
-const quoteTweets = await roClient.v2.search(`url:twitter.com/${handle}`, {...});
+```toml
+[[routes]]
+pattern = "x-bot.your-domain.com/*"
+zone_name = "your-domain.com"
 ```
 
 ## Project Structure
@@ -181,33 +229,53 @@ twitter-loyalty-bot/
 ├── wrangler.toml         # Your config (gitignored)
 ├── wrangler.example.toml # Template config
 ├── package.json
+├── .gitignore
 └── README.md
 ```
 
 ## Troubleshooting
 
 ### "Twitter API secrets not configured"
-- Ensure you've run `wrangler secret put TWITTER_BEARER_TOKEN`
+- Ensure you've run `npx wrangler secret put TWITTER_BEARER_TOKEN`
 
-### "User not found"
-- Verify `TWITTER_HANDLE` is correct (without @)
-- Check that the account is public
+### "Twitter handle not configured in Partner Portal"
+- Go to Partner Portal → Settings → Profile → Twitter
+- Enter your handle (without @) and save
 
-### "Rate limit exceeded"
-- Twitter Basic tier has 10,000 reads/month
-- Consider reducing poll frequency or upgrading tier
+### "No config found for brand"
+- Verify `BRAND_ID` in wrangler.toml matches your Partner Portal wallet
+- Ensure `SUPABASE_PUBLISH_KEY` secret is set correctly
+
+### "Rate limit exceeded" (429 error)
+- Twitter Basic tier has 10 requests per 15-minute window
+- Wait 15 minutes for the rate limit to reset
+- Consider reducing poll frequency or upgrading to Pro tier
 
 ### No rewards appearing
 - Verify `BRAND_ID` matches your Partner Portal wallet
 - Check that `tweet_mention` event is configured in Partner Portal
-- View logs with `wrangler tail`
+- View logs with `npx wrangler tail`
+
+### High water mark issues
+- Use `POST /reset` to clear the high water mark
+- Next poll will be treated as first run (processes 3 most recent tweets)
 
 ## Security Notes
 
-- **Never commit** `wrangler.toml` with real secrets
+- **Never commit** `wrangler.toml` with real values (it's gitignored)
 - Use `wrangler.example.toml` as a template
-- Store secrets via `wrangler secret put`
+- Store secrets via `npx wrangler secret put`
 - The `.gitignore` excludes sensitive files
+
+## Rate Limits & Costs
+
+| Twitter API Tier | Monthly Cost | Requests/15min | Monthly Reads |
+|------------------|--------------|----------------|---------------|
+| Basic (Free) | $0 | 10 | ~10,000 |
+| Pro | $100 | 450 | ~500,000 |
+| Enterprise | Custom | Custom | Custom |
+
+For most brands, Basic tier is sufficient. Each poll uses ~2-3 requests (user lookup + search).
 
 ## Related Documentation
 

@@ -35,6 +35,7 @@ SUPABASE_URL = "https://xcyhefjogmgttegqhhyi.supabase.co"
 # NEVER commit actual values to git!
 # ============================================
 # wrangler secret put TWITTER_BEARER_TOKEN
-# wrangler secret put SUPABASE_ANON_KEY
+# wrangler secret put SUPABASE_PUBLISH_KEY
 #
-# Get SUPABASE_ANON_KEY from Loyalteez team or Partner Portal docs
+# TWITTER_BEARER_TOKEN: Get from Twitter Developer Portal
+# SUPABASE_PUBLISH_KEY: Get from Loyalteez team (browser-safe key for RLS)

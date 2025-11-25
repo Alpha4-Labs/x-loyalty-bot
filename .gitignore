@@ -7,7 +7,8 @@ package-lock.json
 .env.local
 .env.*.local
 
-# Wrangler
+# Wrangler config (contains secrets/IDs - use wrangler.example.toml as template)
+wrangler.toml
 .wrangler/
 .dev.vars
 
