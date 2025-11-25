@@ -271,17 +271,16 @@ twitter-loyalty-bot/
 
 | Twitter API Tier | Monthly Cost | Requests/15min | Monthly Tweets | Recommended Polling |
 |------------------|--------------|----------------|----------------|---------------------|
-| **Free** | $0 | **1** | **100** | Hourly (`0 * * * *`) |
+| **Free** | $0 | **1** | **100** | Daily (`0 12 * * *`) |
 | **Basic** | $100/mo | 10 | 10,000 | Every 15 min (`*/15 * * * *`) |
 | **Pro** | $5,000/mo | 450 | 1,000,000 | Every 5 min |
 
 > **⚠️ Important**: The free tier is extremely limited. With only 1 request per 15 minutes and 100 tweets/month, use **hourly polling** to avoid rate limits. For production, upgrade to Basic tier.
 
 ### Free Tier Math
-- 1 request per 15 min = 4 requests/hour max
-- Hourly polling = 24 requests/day
-- 100 tweets/month ÷ 10 tweets/poll = ~10 polls before monthly cap
-- **Recommendation**: Use free tier for testing only
+- 100 tweets/month ÷ ~10 tweets/poll = ~10 polls before monthly cap
+- Daily polling = 30 polls/month (but only counts if tweets are returned)
+- **Recommendation**: Use daily polling for demos, upgrade to Basic for production
 
 ## Related Documentation
 
