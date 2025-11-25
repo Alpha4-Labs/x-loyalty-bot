@@ -18,9 +18,11 @@ compatibility_flags = ["nodejs_compat"]
 binding = "TWITTER_BOT_KV"
 id = "your_kv_namespace_id"
 
-# Scheduled trigger for polling (every 15 mins)
+# Scheduled trigger for polling
+# Free tier: Use hourly ("0 * * * *") to conserve 100 posts/month limit
+# Basic tier ($100/mo): Can use every 15 mins ("*/15 * * * *")
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["0 * * * *"]  # Once per hour (top of each hour)
 
 [vars]
 # Loyalteez Brand ID (Your wallet address from Partner Portal)

@@ -5,7 +5,7 @@ A serverless Twitter integration built on Cloudflare Workers that rewards commun
 ## Features
 
 - **Serverless Architecture**: Runs entirely on Cloudflare Workers (no paid VPS required).
-- **Automatic Polling**: Scheduled triggers check for new engagements every 15 minutes.
+- **Automatic Polling**: Scheduled triggers check for new engagements (hourly on free tier, more frequent on paid).
 - **Mention Tracking**: Rewards users who mention your brand's Twitter handle.
 - **Smart Deduplication**: High water mark + KV storage ensures each tweet is only rewarded once.
 - **Partner Portal Integration**: Twitter handle configured in Partner Portal (single source of truth).
@@ -43,7 +43,7 @@ npm install
 4. Generate a **Bearer Token** (easiest for read-only operations).
 5. Copy the Bearer Token securely.
 
-> **Note**: Basic (Free) tier allows ~10,000 tweet reads/month and 10 requests per 15-minute window. For higher volume, consider Pro tier ($100/month).
+> **⚠️ Free Tier Limitations**: The free tier is very restrictive - only **1 request per 15 minutes** and **100 tweets/month**. Use hourly polling on free tier. For production use, consider Basic tier ($100/month) which allows 10,000 tweets/month.
 
 ### 3. Create KV Namespace
 
@@ -269,13 +269,19 @@ twitter-loyalty-bot/
 
 ## Rate Limits & Costs
 
-| Twitter API Tier | Monthly Cost | Requests/15min | Monthly Reads |
-|------------------|--------------|----------------|---------------|
-| Basic (Free) | $0 | 10 | ~10,000 |
-| Pro | $100 | 450 | ~500,000 |
-| Enterprise | Custom | Custom | Custom |
+| Twitter API Tier | Monthly Cost | Requests/15min | Monthly Tweets | Recommended Polling |
+|------------------|--------------|----------------|----------------|---------------------|
+| **Free** | $0 | **1** | **100** | Hourly (`0 * * * *`) |
+| **Basic** | $100/mo | 10 | 10,000 | Every 15 min (`*/15 * * * *`) |
+| **Pro** | $5,000/mo | 450 | 1,000,000 | Every 5 min |
 
-For most brands, Basic tier is sufficient. Each poll uses ~2-3 requests (user lookup + search).
+> **⚠️ Important**: The free tier is extremely limited. With only 1 request per 15 minutes and 100 tweets/month, use **hourly polling** to avoid rate limits. For production, upgrade to Basic tier.
+
+### Free Tier Math
+- 1 request per 15 min = 4 requests/hour max
+- Hourly polling = 24 requests/day
+- 100 tweets/month ÷ 10 tweets/poll = ~10 polls before monthly cap
+- **Recommendation**: Use free tier for testing only
 
 ## Related Documentation
 

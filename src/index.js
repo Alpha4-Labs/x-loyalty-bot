@@ -284,9 +284,23 @@ export default {
       }
     });
 
+    // Log rate limit headers for debugging
+    const rateLimit = response.headers.get('x-rate-limit-limit');
+    const rateRemaining = response.headers.get('x-rate-limit-remaining');
+    const rateReset = response.headers.get('x-rate-limit-reset');
+    if (rateRemaining !== null) {
+      const resetDate = rateReset ? new Date(parseInt(rateReset) * 1000).toISOString() : 'unknown';
+      console.log(`📊 Rate limit: ${rateRemaining}/${rateLimit} remaining, resets at ${resetDate}`);
+    }
+
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`❌ Twitter API error (searchMentions): ${response.status} - ${errorText}`);
+      // If rate limited, log when it resets
+      if (response.status === 429 && rateReset) {
+        const resetTime = new Date(parseInt(rateReset) * 1000);
+        console.log(`⏰ Rate limit resets at: ${resetTime.toISOString()} (in ${Math.ceil((resetTime - new Date()) / 60000)} minutes)`);
+      }
       return { tweets: [], isFirstRun: !sinceId, newestId: null };
     }
 
