@@ -12,7 +12,9 @@
   },
   "author": "Loyalteez",
   "license": "MIT",
-  "dependencies": {},
+  "dependencies": {
+    "tweetnacl": "^1.0.3"
+  },
   "devDependencies": {
     "wrangler": "^3.0.0"
   }

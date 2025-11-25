@@ -1,0 +1,29 @@
+name = "twitter-loyalty-router"
+main = "src/router.js"
+compatibility_date = "2024-11-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Wildcard route - catches ALL *.loyalteez.app subdomains
+# (specific DNS records like api.loyalteez.app take precedence)
+[[routes]]
+pattern = "*.loyalteez.app/*"
+zone_name = "loyalteez.app"
+
+# KV for brand configurations and tweet tracking
+[[kv_namespaces]]
+binding = "TWITTER_ROUTER_KV"
+id = "776ea2d145f34c119a9382b33151b2ad"
+
+# Scheduled trigger for polling all brands
+# Runs every 15 minutes during peak hours, hourly otherwise
+[triggers]
+crons = ["*/15 8-22 * * *", "0 0-7,23 * * *"]
+
+[vars]
+LOYALTEEZ_API_URL = "https://api.loyalteez.app"
+
+# ============================================
+# SECRETS - Set via CLI:
+# wrangler secret put ENCRYPTION_PRIVATE_KEY -c wrangler.router.toml
+# ============================================
+
