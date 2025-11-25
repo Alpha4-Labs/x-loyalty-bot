@@ -415,6 +415,7 @@ export default {
     console.log(`✅ Poll complete for @${twitterHandle}`);
   },
 
+  // Send reward event - Uses Service Bindings if available (avoids 522 timeouts)
   async sendRewardEvent(brandSlug, brandConfig, tweet, env) {
     const brandId = brandConfig.brand_id;
     const userEmail = `twitter_${tweet.author_id}@loyalteez.app`;
@@ -435,21 +436,61 @@ export default {
 
     console.log(`📤 Sending reward event for tweet ${tweet.id}`);
 
+    // Try Service Binding first (preferred - avoids 522 timeouts)
+    if (env.EVENT_HANDLER) {
+      try {
+        console.log(`📤 Using Service Binding to event-handler...`);
+        const serviceBindingUrl = 'https://api.loyalteez.app/loyalteez-api/manual-event';
+        const request = new Request(serviceBindingUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const response = await env.EVENT_HANDLER.fetch(request);
+        const responseText = await response.text();
+        
+        let data;
+        try {
+          data = JSON.parse(responseText);
+        } catch (e) {
+          console.error('Failed to parse service binding response:', responseText.substring(0, 200));
+          throw new Error(`Service binding returned invalid JSON: ${response.status}`);
+        }
+
+        if (!response.ok) {
+          console.error(`❌ API error (Service Binding): ${response.status}`, data);
+          throw new Error(data.error || `API returned ${response.status}`);
+        }
+
+        console.log(`✅ Reward event sent via Service Binding for user ${tweet.author_id}`);
+        return true;
+      } catch (error) {
+        console.error('Service Binding failed, falling back to HTTP:', error.message);
+        // Fall through to HTTP fetch
+      }
+    }
+
+    // Fallback to HTTP fetch
     try {
       const apiUrl = env.LOYALTEEZ_API_URL || 'https://api.loyalteez.app';
+      console.log(`📤 Using HTTP fetch to ${apiUrl}/loyalteez-api/manual-event...`);
       const response = await fetch(`${apiUrl}/loyalteez-api/manual-event`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'User-Agent': 'Loyalteez-Twitter-Router/1.0'
+        },
         body: JSON.stringify(payload)
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`❌ API error: ${response.status} - ${errorText}`);
+        console.error(`❌ API error (HTTP): ${response.status} - ${errorText}`);
         return false;
       }
 
-      console.log(`✅ Reward event sent for user ${tweet.author_id}`);
+      console.log(`✅ Reward event sent via HTTP for user ${tweet.author_id}`);
       return true;
     } catch (error) {
       console.error(`❌ Failed to send reward event:`, error);

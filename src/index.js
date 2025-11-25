@@ -356,6 +356,7 @@ export default {
   },
 
   // Send reward event to Loyalteez Event Handler - returns true on success
+  // Uses Service Bindings if available (avoids 522 timeouts), otherwise falls back to HTTP
   async sendRewardEvent(env, socialId, eventType, referenceId) {
     // Use same payload format as Discord bot (loyalteez.js)
     // Twitter users get a synthetic email: twitter_{userId}@loyalteez.app
@@ -374,23 +375,62 @@ export default {
       }
     };
 
+    // Try Service Binding first (preferred - avoids 522 timeouts)
+    if (env.EVENT_HANDLER) {
+      try {
+        console.log(`📤 Sending event via Service Binding...`);
+        // Use recognized API hostname so event-handler routes correctly
+        const serviceBindingUrl = 'https://api.loyalteez.app/loyalteez-api/manual-event';
+        const request = new Request(serviceBindingUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const response = await env.EVENT_HANDLER.fetch(request);
+        const responseText = await response.text();
+        
+        let data;
+        try {
+          data = JSON.parse(responseText);
+        } catch (e) {
+          console.error('Failed to parse service binding response:', responseText.substring(0, 200));
+          throw new Error(`Service binding returned invalid JSON: ${response.status}`);
+        }
+
+        if (!response.ok) {
+          console.error(`❌ API error (Service Binding): ${response.status}`, data);
+          throw new Error(data.error || `API returned ${response.status}`);
+        }
+
+        console.log(`✅ Event sent successfully via Service Binding:`, data.message || '');
+        return true;
+      } catch (error) {
+        console.error('Service Binding failed, falling back to HTTP:', error.message);
+        // Fall through to HTTP fetch
+      }
+    }
+
+    // Fallback to HTTP fetch
     try {
-      // Using the same endpoint as Discord bot: /loyalteez-api/manual-event
-      console.log(`📤 Sending event to ${env.LOYALTEEZ_API_URL}/loyalteez-api/manual-event...`);
+      console.log(`📤 Sending event via HTTP to ${env.LOYALTEEZ_API_URL}/loyalteez-api/manual-event...`);
       const response = await fetch(`${env.LOYALTEEZ_API_URL}/loyalteez-api/manual-event`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'User-Agent': 'Loyalteez-Twitter-Bot/1.0'
+        },
         body: JSON.stringify(payload)
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`❌ API error: ${response.status} - ${errorText}`);
+        console.error(`❌ API error (HTTP): ${response.status} - ${errorText}`);
         return false;
       }
       
       const result = await response.json().catch(() => ({}));
-      console.log(`✅ Event sent successfully`, result.message || '');
+      console.log(`✅ Event sent successfully via HTTP:`, result.message || '');
       return true;
     } catch (error) {
       console.error(`❌ Failed to send reward event:`, error.message || error);
