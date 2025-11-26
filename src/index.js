@@ -5,12 +5,24 @@
  * Reads configuration from Supabase (Partner Portal) for single source of truth.
  */
 
+// CORS headers for health checks from browser
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
+
 export default {
   // HTTP Handler for manual triggers or health checks
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     
-    // Health check endpoint
+    // Handle CORS preflight
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
+    }
+    
+    // Health check endpoint with CORS
     if (url.pathname === '/health') {
       const config = await this.getBrandConfig(env);
       return new Response(JSON.stringify({ 
@@ -20,15 +32,19 @@ export default {
         twitter_handle: config?.twitterHandle || 'not configured',
         timestamp: new Date().toISOString()
       }), {
-        headers: { 'Content-Type': 'application/json' }
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
     // Manual trigger endpoint (for testing)
     if (url.pathname === '/trigger' && request.method === 'POST') {
       try {
-        await this.pollTwitterMentions(env);
-        return new Response(JSON.stringify({ success: true, message: 'Poll triggered' }), {
+        const result = await this.pollTwitterMentions(env);
+        return new Response(JSON.stringify({ 
+          success: true, 
+          message: 'Poll triggered',
+          ...result
+        }), {
           headers: { 'Content-Type': 'application/json' }
         });
       } catch (error) {
@@ -156,19 +172,30 @@ export default {
 
   // Main polling logic
   async pollTwitterMentions(env) {
+    const result = {
+      mentionsFound: 0,
+      rewardsIssued: 0,
+      rewardsFailed: 0,
+      errors: []
+    };
+
     try {
       // Check if Bearer Token is configured
       if (!env.TWITTER_BEARER_TOKEN) {
-        console.log("⚠️ TWITTER_BEARER_TOKEN not configured. Skipping poll.");
-        return;
+        const error = "TWITTER_BEARER_TOKEN not configured";
+        console.log(`⚠️ ${error}. Skipping poll.`);
+        result.errors.push(error);
+        return result;
       }
 
       // Fetch Twitter handle from Supabase (Partner Portal config)
       const config = await this.getBrandConfig(env);
       if (!config || !config.twitterHandle) {
-        console.log("⚠️ Twitter handle not configured in Partner Portal. Skipping poll.");
+        const error = "Twitter handle not configured in Partner Portal";
+        console.log(`⚠️ ${error}. Skipping poll.`);
         console.log("   → Go to Partner Portal → Settings → Profile → X (Twitter) to set your handle.");
-        return;
+        result.errors.push(error);
+        return result;
       }
 
       const handle = config.twitterHandle;
@@ -177,21 +204,25 @@ export default {
       // Step 1: Get User ID for the handle
       const userId = await this.getUserId(env, handle);
       if (!userId) {
-        console.error(`❌ Could not find user ID for @${handle}`);
-        return;
+        const error = `Could not find user ID for @${handle}`;
+        console.error(`❌ ${error}`);
+        result.errors.push(error);
+        return result;
       }
       console.log(`✅ Found user ID: ${userId}`);
 
       // Step 2: Search for recent mentions (with high water mark)
       const { tweets, isFirstRun, newestId } = await this.searchMentions(env, handle);
       
+      result.mentionsFound = tweets?.length || 0;
+
       if (!tweets || tweets.length === 0) {
         console.log("📭 No new mentions found.");
         // Still update high water mark if we got a newestId from API meta
         if (newestId) {
           await this.updateHighWaterMark(env, handle, newestId);
         }
-        return;
+        return result;
       }
 
       if (isFirstRun) {
@@ -203,8 +234,15 @@ export default {
       // Step 3: Process each mention
       let processedCount = 0;
       for (const tweet of tweets) {
-        const processed = await this.processTweet(env, tweet, 'tweet_mention');
-        if (processed) processedCount++;
+        const { processed, success } = await this.processTweet(env, tweet, 'tweet_mention');
+        if (processed) {
+          processedCount++;
+          if (success) {
+            result.rewardsIssued++;
+          } else {
+            result.rewardsFailed++;
+          }
+        }
       }
 
       // Step 4: Update high water mark AFTER successful processing
@@ -212,10 +250,15 @@ export default {
         await this.updateHighWaterMark(env, handle, newestId);
       }
 
-      console.log(`✅ Poll complete. Processed ${processedCount}/${tweets.length} tweets.`);
+      console.log(`✅ Poll complete. Processed ${processedCount}/${tweets.length} tweets. Issued ${result.rewardsIssued} rewards, ${result.rewardsFailed} failed.`);
+
+      return result;
 
     } catch (error) {
-      console.error("❌ Error in poll:", error.message || error);
+      const errorMsg = error.message || String(error);
+      console.error(`❌ Error in poll: ${errorMsg}`);
+      result.errors.push(errorMsg);
+      return result;
     }
   },
 
@@ -325,7 +368,7 @@ export default {
     console.log(`📍 Updated high water mark to: ${newestId}`);
   },
 
-  // Process a single tweet - returns true if processed, false if skipped
+  // Process a single tweet - returns { processed: boolean, success: boolean }
   async processTweet(env, tweet, eventType) {
     const tweetId = tweet.id;
     const authorId = tweet.author_id;
@@ -336,7 +379,7 @@ export default {
     
     if (isProcessed) {
       console.log(`⏭️ Skipping already processed tweet: ${tweetId}`);
-      return false;
+      return { processed: false, success: false };
     }
 
     const tweetPreview = tweet.text?.substring(0, 50) || 'No text';
@@ -352,7 +395,7 @@ export default {
       success: success
     }), { expirationTtl: 2592000 }); // 30 days
     
-    return true;
+    return { processed: true, success };
   },
 
   // Send reward event to Loyalteez Event Handler - returns true on success
@@ -362,11 +405,17 @@ export default {
     // Twitter users get a synthetic email: twitter_{userId}@loyalteez.app
     const userEmail = `twitter_${socialId}@loyalteez.app`;
     
+    // Get the Twitter handle from config for authorization
+    const config = await this.getBrandConfig(env);
+    const twitterHandle = config?.twitterHandle;
+
     const payload = {
       brandId: env.BRAND_ID,
       eventType: eventType,
       userEmail: userEmail,
-      domain: 'x-demo.loyalteez.app',
+      // Use Twitter handle as the authorization (registered in Partner Portal)
+      // This validates: "mentions of @handle are valid engagement for this brand"
+      twitterHandle: twitterHandle,
       metadata: {
         platform: 'twitter',
         twitter_user_id: socialId,
