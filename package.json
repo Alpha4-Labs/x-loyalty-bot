@@ -1,7 +1,7 @@
 {
   "name": "twitter-loyalty-bot",
-  "version": "1.0.0",
-  "description": "A Cloudflare Worker that rewards X (Twitter) engagement with LTZ tokens.",
+  "version": "2.0.0",
+  "description": "Cloudflare Worker that rewards X (Twitter) engagement (mentions, replies, likes, retweets) with LTZ tokens via Loyalteez.",
   "type": "module",
   "main": "src/index.js",
   "scripts": {

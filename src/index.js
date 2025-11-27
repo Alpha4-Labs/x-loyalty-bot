@@ -1,7 +1,8 @@
 /**
  * Twitter/X Loyalty Bot - Cloudflare Worker
  * 
- * Polls Twitter API for brand mentions and rewards users with LTZ tokens.
+ * Polls Twitter API for brand engagements and rewards users with LTZ tokens.
+ * Supports: mentions, replies, likes, and retweets.
  * Reads configuration from Supabase (Partner Portal) for single source of truth.
  */
 
@@ -10,6 +11,14 @@ const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
+};
+
+// Event types supported by the bot
+const EVENT_TYPES = {
+  MENTION: 'tweet_mention',
+  REPLY: 'tweet_reply',
+  LIKE: 'tweet_like',
+  RETWEET: 'tweet_retweet'
 };
 
 export default {
@@ -30,6 +39,7 @@ export default {
         service: 'twitter-loyalty-bot',
         brand_id: env.BRAND_ID,
         twitter_handle: config?.twitterHandle || 'not configured',
+        supported_events: Object.values(EVENT_TYPES),
         timestamp: new Date().toISOString()
       }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -39,10 +49,40 @@ export default {
     // Manual trigger endpoint (for testing)
     if (url.pathname === '/trigger' && request.method === 'POST') {
       try {
-        const result = await this.pollTwitterMentions(env);
+        const result = await this.pollAllEngagements(env);
         return new Response(JSON.stringify({ 
           success: true, 
           message: 'Poll triggered',
+          ...result
+        }), {
+          headers: { 'Content-Type': 'application/json' }
+        });
+      } catch (error) {
+        return new Response(JSON.stringify({ success: false, error: error.message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    // Trigger specific engagement type
+    if (url.pathname.startsWith('/trigger/') && request.method === 'POST') {
+      const eventType = url.pathname.replace('/trigger/', '');
+      const validTypes = ['mentions', 'replies', 'likes', 'retweets'];
+      if (!validTypes.includes(eventType)) {
+        return new Response(JSON.stringify({ 
+          success: false, 
+          error: `Invalid event type. Valid types: ${validTypes.join(', ')}` 
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      try {
+        const result = await this.pollEngagementType(env, eventType);
+        return new Response(JSON.stringify({ 
+          success: true, 
+          message: `Poll triggered for ${eventType}`,
           ...result
         }), {
           headers: { 'Content-Type': 'application/json' }
@@ -60,11 +100,14 @@ export default {
       try {
         const config = await this.getBrandConfig(env);
         if (config?.twitterHandle) {
-          const highWaterKey = `high_water:${config.twitterHandle.toLowerCase()}`;
-          await env.TWITTER_BOT_KV.delete(highWaterKey);
+          const handle = config.twitterHandle.toLowerCase();
+          // Reset all high water marks
+          await env.TWITTER_BOT_KV.delete(`high_water:mentions:${handle}`);
+          await env.TWITTER_BOT_KV.delete(`high_water:replies:${handle}`);
+          await env.TWITTER_BOT_KV.delete(`high_water:tweets:${handle}`);
           return new Response(JSON.stringify({ 
             success: true, 
-            message: `High water mark reset for @${config.twitterHandle}. Next poll will be treated as first run.` 
+            message: `All high water marks reset for @${config.twitterHandle}. Next poll will be treated as first run.` 
           }), {
             headers: { 'Content-Type': 'application/json' }
           });
@@ -94,13 +137,31 @@ export default {
         has_vite_supabase_secret_key: !!env.VITE_SUPABASE_SECRET_KEY,
         has_supabase_publish_key: !!env.SUPABASE_PUBLISH_KEY,
         supabase_key_available: !!supabaseKey,
-        supabase_url: env.SUPABASE_URL || 'NOT SET'
+        supabase_url: env.SUPABASE_URL || 'NOT SET',
+        supported_events: Object.values(EVENT_TYPES)
       }, null, 2), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
-    return new Response("🐦 Twitter Loyalty Bot Active\n\nEndpoints:\n- GET /health - Health check\n- GET /config - View configuration\n- POST /trigger - Manual poll trigger\n- POST /reset - Reset high water mark (for testing)", { 
+    return new Response(`🐦 Twitter Loyalty Bot Active
+
+Supported Engagement Types:
+- tweet_mention: User mentions @YourBrand in a tweet
+- tweet_reply: User replies to your tweets  
+- tweet_like: User likes your tweets (requires elevated API)
+- tweet_retweet: User retweets your content (requires elevated API)
+
+Endpoints:
+- GET  /health           - Health check
+- GET  /config           - View configuration
+- POST /trigger          - Poll all engagement types
+- POST /trigger/mentions - Poll mentions only
+- POST /trigger/replies  - Poll replies only
+- POST /trigger/likes    - Poll likes only (elevated API)
+- POST /trigger/retweets - Poll retweets only (elevated API)
+- POST /reset            - Reset all high water marks
+`, { 
       status: 200,
       headers: { 'Content-Type': 'text/plain' }
     });
@@ -108,8 +169,8 @@ export default {
 
   // Scheduled Handler for Polling (cron trigger)
   async scheduled(event, env, ctx) {
-    console.log("⏰ Cron triggered - Running Twitter Poll...");
-    await this.pollTwitterMentions(env);
+    console.log("⏰ Cron triggered - Running Twitter Engagement Poll...");
+    await this.pollAllEngagements(env);
   },
 
   // Fetch brand configuration from Supabase
@@ -170,7 +231,91 @@ export default {
     }
   },
 
-  // Main polling logic
+  // Poll a specific engagement type
+  async pollEngagementType(env, type) {
+    switch (type) {
+      case 'mentions':
+        return await this.pollTwitterMentions(env);
+      case 'replies':
+        return await this.pollTwitterReplies(env);
+      case 'likes':
+        return await this.pollTwitterLikes(env);
+      case 'retweets':
+        return await this.pollTwitterRetweets(env);
+      default:
+        throw new Error(`Unknown engagement type: ${type}`);
+    }
+  },
+
+  // Poll all engagement types
+  async pollAllEngagements(env) {
+    const results = {
+      mentions: { found: 0, rewarded: 0, errors: [] },
+      replies: { found: 0, rewarded: 0, errors: [] },
+      likes: { found: 0, rewarded: 0, errors: [] },
+      retweets: { found: 0, rewarded: 0, errors: [] }
+    };
+
+    // Check prerequisites
+    if (!env.TWITTER_BEARER_TOKEN) {
+      const error = "TWITTER_BEARER_TOKEN not configured";
+      console.log(`⚠️ ${error}. Skipping poll.`);
+      return { error, results };
+    }
+
+    const config = await this.getBrandConfig(env);
+    if (!config || !config.twitterHandle) {
+      const error = "Twitter handle not configured in Partner Portal";
+      console.log(`⚠️ ${error}. Skipping poll.`);
+      return { error, results };
+    }
+
+    console.log(`🔄 Starting full engagement poll for @${config.twitterHandle}...`);
+
+    // Poll mentions (Basic tier)
+    try {
+      const mentionResult = await this.pollTwitterMentions(env);
+      results.mentions = { found: mentionResult.mentionsFound, rewarded: mentionResult.rewardsIssued, errors: mentionResult.errors };
+    } catch (error) {
+      console.error(`❌ Mentions poll failed:`, error.message);
+      results.mentions.errors.push(error.message);
+    }
+
+    // Poll replies (Basic tier)
+    try {
+      const replyResult = await this.pollTwitterReplies(env);
+      results.replies = { found: replyResult.repliesFound, rewarded: replyResult.rewardsIssued, errors: replyResult.errors };
+    } catch (error) {
+      console.error(`❌ Replies poll failed:`, error.message);
+      results.replies.errors.push(error.message);
+    }
+
+    // Poll likes (Elevated API required)
+    try {
+      const likeResult = await this.pollTwitterLikes(env);
+      results.likes = { found: likeResult.likesFound, rewarded: likeResult.rewardsIssued, errors: likeResult.errors };
+    } catch (error) {
+      console.error(`❌ Likes poll failed:`, error.message);
+      results.likes.errors.push(error.message);
+    }
+
+    // Poll retweets (Elevated API required)
+    try {
+      const retweetResult = await this.pollTwitterRetweets(env);
+      results.retweets = { found: retweetResult.retweetsFound, rewarded: retweetResult.rewardsIssued, errors: retweetResult.errors };
+    } catch (error) {
+      console.error(`❌ Retweets poll failed:`, error.message);
+      results.retweets.errors.push(error.message);
+    }
+
+    console.log(`✅ Full engagement poll complete:`, JSON.stringify(results, null, 2));
+    return { results };
+  },
+
+  // ============================================
+  // MENTIONS POLLING (Basic Tier)
+  // ============================================
+
   async pollTwitterMentions(env) {
     const result = {
       mentionsFound: 0,
@@ -180,86 +325,474 @@ export default {
     };
 
     try {
-      // Check if Bearer Token is configured
       if (!env.TWITTER_BEARER_TOKEN) {
-        const error = "TWITTER_BEARER_TOKEN not configured";
-        console.log(`⚠️ ${error}. Skipping poll.`);
-        result.errors.push(error);
+        result.errors.push("TWITTER_BEARER_TOKEN not configured");
         return result;
       }
 
-      // Fetch Twitter handle from Supabase (Partner Portal config)
       const config = await this.getBrandConfig(env);
       if (!config || !config.twitterHandle) {
-        const error = "Twitter handle not configured in Partner Portal";
-        console.log(`⚠️ ${error}. Skipping poll.`);
-        console.log("   → Go to Partner Portal → Settings → Profile → X (Twitter) to set your handle.");
-        result.errors.push(error);
+        result.errors.push("Twitter handle not configured in Partner Portal");
         return result;
       }
 
       const handle = config.twitterHandle;
       console.log(`🔎 Searching mentions for @${handle}...`);
 
-      // Step 1: Get User ID for the handle
+      // Get User ID for the handle
       const userId = await this.getUserId(env, handle);
       if (!userId) {
-        const error = `Could not find user ID for @${handle}`;
-        console.error(`❌ ${error}`);
-        result.errors.push(error);
+        result.errors.push(`Could not find user ID for @${handle}`);
         return result;
       }
-      console.log(`✅ Found user ID: ${userId}`);
 
-      // Step 2: Search for recent mentions (with high water mark)
+      // Search for recent mentions
       const { tweets, isFirstRun, newestId } = await this.searchMentions(env, handle);
-      
       result.mentionsFound = tweets?.length || 0;
 
       if (!tweets || tweets.length === 0) {
         console.log("📭 No new mentions found.");
-        // Still update high water mark if we got a newestId from API meta
         if (newestId) {
-          await this.updateHighWaterMark(env, handle, newestId);
+          await this.updateHighWaterMark(env, 'mentions', handle, newestId);
         }
         return result;
       }
 
-      if (isFirstRun) {
-        console.log(`🆕 First run: Processing ${tweets.length} most recent tweets (limited to 3)`);
-      } else {
-        console.log(`📬 Found ${tweets.length} NEW mentions to process.`);
+      console.log(`📬 Found ${tweets.length} ${isFirstRun ? 'recent' : 'NEW'} mentions to process.`);
+
+      // Process each mention
+      for (const tweet of tweets) {
+        const { processed, success } = await this.processTweet(env, tweet, EVENT_TYPES.MENTION);
+        if (processed) {
+          if (success) result.rewardsIssued++;
+          else result.rewardsFailed++;
+        }
       }
 
-      // Step 3: Process each mention
-      let processedCount = 0;
+      // Update high water mark
+      if (newestId) {
+        await this.updateHighWaterMark(env, 'mentions', handle, newestId);
+      }
+
+      console.log(`✅ Mentions poll complete. Found ${result.mentionsFound}, rewarded ${result.rewardsIssued}.`);
+      return result;
+
+    } catch (error) {
+      result.errors.push(error.message || String(error));
+      return result;
+    }
+  },
+
+  // ============================================
+  // REPLIES POLLING (Basic Tier)
+  // ============================================
+
+  async pollTwitterReplies(env) {
+    const result = {
+      repliesFound: 0,
+      rewardsIssued: 0,
+      rewardsFailed: 0,
+      errors: []
+    };
+
+    try {
+      if (!env.TWITTER_BEARER_TOKEN) {
+        result.errors.push("TWITTER_BEARER_TOKEN not configured");
+        return result;
+      }
+
+      const config = await this.getBrandConfig(env);
+      if (!config || !config.twitterHandle) {
+        result.errors.push("Twitter handle not configured in Partner Portal");
+        return result;
+      }
+
+      const handle = config.twitterHandle;
+      console.log(`🔎 Searching replies to @${handle}...`);
+
+      // Get User ID for the handle
+      const userId = await this.getUserId(env, handle);
+      if (!userId) {
+        result.errors.push(`Could not find user ID for @${handle}`);
+        return result;
+      }
+
+      // Search for replies to brand's tweets
+      const { tweets, isFirstRun, newestId } = await this.searchReplies(env, handle, userId);
+      result.repliesFound = tweets?.length || 0;
+
+      if (!tweets || tweets.length === 0) {
+        console.log("📭 No new replies found.");
+        if (newestId) {
+          await this.updateHighWaterMark(env, 'replies', handle, newestId);
+        }
+        return result;
+      }
+
+      console.log(`📬 Found ${tweets.length} ${isFirstRun ? 'recent' : 'NEW'} replies to process.`);
+
+      // Process each reply
       for (const tweet of tweets) {
-        const { processed, success } = await this.processTweet(env, tweet, 'tweet_mention');
+        const { processed, success } = await this.processTweet(env, tweet, EVENT_TYPES.REPLY);
         if (processed) {
-          processedCount++;
-          if (success) {
-            result.rewardsIssued++;
-          } else {
-            result.rewardsFailed++;
+          if (success) result.rewardsIssued++;
+          else result.rewardsFailed++;
+        }
+      }
+
+      // Update high water mark
+      if (newestId) {
+        await this.updateHighWaterMark(env, 'replies', handle, newestId);
+      }
+
+      console.log(`✅ Replies poll complete. Found ${result.repliesFound}, rewarded ${result.rewardsIssued}.`);
+      return result;
+
+    } catch (error) {
+      result.errors.push(error.message || String(error));
+      return result;
+    }
+  },
+
+  // Search for replies to brand's tweets using conversation_id
+  async searchReplies(env, handle, brandUserId) {
+    const highWaterKey = `high_water:replies:${handle.toLowerCase()}`;
+    const sinceId = await env.TWITTER_BOT_KV.get(highWaterKey);
+
+    // Search for tweets that are replies to the brand (using "to:" operator)
+    // Also filter to only include replies (is:reply)
+    const query = encodeURIComponent(`to:${handle} is:reply -from:${handle}`);
+    let url = `https://api.twitter.com/2/tweets/search/recent?query=${query}&max_results=10&tweet.fields=author_id,created_at,text,in_reply_to_user_id,conversation_id&expansions=author_id`;
+
+    if (sinceId) {
+      url += `&since_id=${sinceId}`;
+      console.log(`📍 Using replies high water mark: since_id=${sinceId}`);
+    } else {
+      console.log(`🆕 First replies run - will only process most recent 3 replies`);
+    }
+
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    this.logRateLimits(response);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Twitter API error (searchReplies): ${response.status} - ${errorText}`);
+      return { tweets: [], isFirstRun: !sinceId, newestId: null };
+    }
+
+    const data = await response.json();
+    let tweets = data.data || [];
+
+    // Filter to only include replies where in_reply_to_user_id matches the brand
+    tweets = tweets.filter(tweet => tweet.in_reply_to_user_id === brandUserId);
+
+    const newestId = data.meta?.newest_id || (tweets.length > 0 ? tweets[0].id : null);
+
+    return {
+      tweets: !sinceId && tweets.length > 3 ? tweets.slice(0, 3) : tweets,
+      isFirstRun: !sinceId,
+      newestId
+    };
+  },
+
+  // ============================================
+  // LIKES POLLING (Elevated API Required)
+  // ============================================
+
+  async pollTwitterLikes(env) {
+    const result = {
+      likesFound: 0,
+      rewardsIssued: 0,
+      rewardsFailed: 0,
+      errors: []
+    };
+
+    try {
+      if (!env.TWITTER_BEARER_TOKEN) {
+        result.errors.push("TWITTER_BEARER_TOKEN not configured");
+        return result;
+      }
+
+      const config = await this.getBrandConfig(env);
+      if (!config || !config.twitterHandle) {
+        result.errors.push("Twitter handle not configured in Partner Portal");
+        return result;
+      }
+
+      const handle = config.twitterHandle;
+      console.log(`🔎 Searching likes on @${handle}'s tweets...`);
+
+      // Get User ID for the handle
+      const userId = await this.getUserId(env, handle);
+      if (!userId) {
+        result.errors.push(`Could not find user ID for @${handle}`);
+        return result;
+      }
+
+      // Get the brand's recent tweets
+      const brandTweets = await this.getBrandRecentTweets(env, userId, handle);
+      if (!brandTweets || brandTweets.length === 0) {
+        console.log("📭 No recent brand tweets to check for likes.");
+        return result;
+      }
+
+      console.log(`📋 Checking likes on ${brandTweets.length} brand tweets...`);
+
+      // For each tweet, get users who liked it
+      for (const tweet of brandTweets) {
+        const likers = await this.getTweetLikers(env, tweet.id, handle);
+        if (!likers || likers.length === 0) continue;
+
+        console.log(`❤️ Found ${likers.length} likers on tweet ${tweet.id}`);
+
+        for (const liker of likers) {
+          result.likesFound++;
+          
+          // Create a synthetic tweet object for processing
+          const likeEvent = {
+            id: `like_${tweet.id}_${liker.id}`,
+            author_id: liker.id,
+            text: `Liked tweet: ${tweet.text?.substring(0, 50)}...`,
+            liked_tweet_id: tweet.id
+          };
+
+          const { processed, success } = await this.processTweet(env, likeEvent, EVENT_TYPES.LIKE);
+          if (processed) {
+            if (success) result.rewardsIssued++;
+            else result.rewardsFailed++;
           }
         }
       }
 
-      // Step 4: Update high water mark AFTER successful processing
-      if (newestId) {
-        await this.updateHighWaterMark(env, handle, newestId);
-      }
-
-      console.log(`✅ Poll complete. Processed ${processedCount}/${tweets.length} tweets. Issued ${result.rewardsIssued} rewards, ${result.rewardsFailed} failed.`);
-
+      console.log(`✅ Likes poll complete. Found ${result.likesFound}, rewarded ${result.rewardsIssued}.`);
       return result;
 
     } catch (error) {
-      const errorMsg = error.message || String(error);
-      console.error(`❌ Error in poll: ${errorMsg}`);
-      result.errors.push(errorMsg);
+      // Check for elevated access errors
+      if (error.message?.includes('403') || error.message?.includes('elevated')) {
+        result.errors.push("Likes tracking requires elevated Twitter API access. Upgrade to Pro tier ($5000/mo) or use OAuth 2.0 User Context.");
+      } else {
+        result.errors.push(error.message || String(error));
+      }
       return result;
     }
+  },
+
+  // Get users who liked a specific tweet
+  async getTweetLikers(env, tweetId, handle) {
+    const cacheKey = `likers_checked:${tweetId}`;
+    const lastCheckedLikers = await env.TWITTER_BOT_KV.get(cacheKey);
+    const previousLikerIds = lastCheckedLikers ? JSON.parse(lastCheckedLikers) : [];
+
+    // Note: This endpoint requires elevated access (Pro tier) or OAuth 2.0 User Context
+    const url = `https://api.twitter.com/2/tweets/${tweetId}/liking_users?max_results=100`;
+
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    this.logRateLimits(response);
+
+    if (!response.ok) {
+      if (response.status === 403) {
+        console.log(`⚠️ Likes endpoint requires elevated API access`);
+        throw new Error('403 - Elevated API access required for likes');
+      }
+      const errorText = await response.text();
+      console.error(`❌ Twitter API error (getTweetLikers): ${response.status} - ${errorText}`);
+      return [];
+    }
+
+    const data = await response.json();
+    const allLikers = data.data || [];
+
+    // Filter to only include NEW likers (not already rewarded)
+    const newLikers = allLikers.filter(liker => !previousLikerIds.includes(liker.id));
+
+    // Update the cache with all current likers
+    const allLikerIds = allLikers.map(l => l.id);
+    await env.TWITTER_BOT_KV.put(cacheKey, JSON.stringify(allLikerIds), { expirationTtl: 86400 * 7 });
+
+    return newLikers;
+  },
+
+  // ============================================
+  // RETWEETS POLLING (Elevated API Required)
+  // ============================================
+
+  async pollTwitterRetweets(env) {
+    const result = {
+      retweetsFound: 0,
+      rewardsIssued: 0,
+      rewardsFailed: 0,
+      errors: []
+    };
+
+    try {
+      if (!env.TWITTER_BEARER_TOKEN) {
+        result.errors.push("TWITTER_BEARER_TOKEN not configured");
+        return result;
+      }
+
+      const config = await this.getBrandConfig(env);
+      if (!config || !config.twitterHandle) {
+        result.errors.push("Twitter handle not configured in Partner Portal");
+        return result;
+      }
+
+      const handle = config.twitterHandle;
+      console.log(`🔎 Searching retweets of @${handle}'s tweets...`);
+
+      // Get User ID for the handle
+      const userId = await this.getUserId(env, handle);
+      if (!userId) {
+        result.errors.push(`Could not find user ID for @${handle}`);
+        return result;
+      }
+
+      // Get the brand's recent tweets
+      const brandTweets = await this.getBrandRecentTweets(env, userId, handle);
+      if (!brandTweets || brandTweets.length === 0) {
+        console.log("📭 No recent brand tweets to check for retweets.");
+        return result;
+      }
+
+      console.log(`📋 Checking retweets on ${brandTweets.length} brand tweets...`);
+
+      // For each tweet, get users who retweeted it
+      for (const tweet of brandTweets) {
+        const retweeters = await this.getTweetRetweeters(env, tweet.id, handle);
+        if (!retweeters || retweeters.length === 0) continue;
+
+        console.log(`🔁 Found ${retweeters.length} retweeters on tweet ${tweet.id}`);
+
+        for (const retweeter of retweeters) {
+          result.retweetsFound++;
+
+          // Create a synthetic tweet object for processing
+          const retweetEvent = {
+            id: `retweet_${tweet.id}_${retweeter.id}`,
+            author_id: retweeter.id,
+            text: `Retweeted: ${tweet.text?.substring(0, 50)}...`,
+            retweeted_tweet_id: tweet.id
+          };
+
+          const { processed, success } = await this.processTweet(env, retweetEvent, EVENT_TYPES.RETWEET);
+          if (processed) {
+            if (success) result.rewardsIssued++;
+            else result.rewardsFailed++;
+          }
+        }
+      }
+
+      console.log(`✅ Retweets poll complete. Found ${result.retweetsFound}, rewarded ${result.rewardsIssued}.`);
+      return result;
+
+    } catch (error) {
+      // Check for elevated access errors
+      if (error.message?.includes('403') || error.message?.includes('elevated')) {
+        result.errors.push("Retweet tracking requires elevated Twitter API access. Upgrade to Pro tier ($5000/mo) or use OAuth 2.0 User Context.");
+      } else {
+        result.errors.push(error.message || String(error));
+      }
+      return result;
+    }
+  },
+
+  // Get users who retweeted a specific tweet
+  async getTweetRetweeters(env, tweetId, handle) {
+    const cacheKey = `retweeters_checked:${tweetId}`;
+    const lastCheckedRetweeters = await env.TWITTER_BOT_KV.get(cacheKey);
+    const previousRetweeterIds = lastCheckedRetweeters ? JSON.parse(lastCheckedRetweeters) : [];
+
+    // Note: This endpoint requires elevated access (Pro tier) or OAuth 2.0 User Context
+    const url = `https://api.twitter.com/2/tweets/${tweetId}/retweeted_by?max_results=100`;
+
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    this.logRateLimits(response);
+
+    if (!response.ok) {
+      if (response.status === 403) {
+        console.log(`⚠️ Retweets endpoint requires elevated API access`);
+        throw new Error('403 - Elevated API access required for retweets');
+      }
+      const errorText = await response.text();
+      console.error(`❌ Twitter API error (getTweetRetweeters): ${response.status} - ${errorText}`);
+      return [];
+    }
+
+    const data = await response.json();
+    const allRetweeters = data.data || [];
+
+    // Filter to only include NEW retweeters (not already rewarded)
+    const newRetweeters = allRetweeters.filter(rt => !previousRetweeterIds.includes(rt.id));
+
+    // Update the cache with all current retweeters
+    const allRetweeterIds = allRetweeters.map(r => r.id);
+    await env.TWITTER_BOT_KV.put(cacheKey, JSON.stringify(allRetweeterIds), { expirationTtl: 86400 * 7 });
+
+    return newRetweeters;
+  },
+
+  // ============================================
+  // SHARED UTILITIES
+  // ============================================
+
+  // Get brand's recent tweets (for likes/retweets tracking)
+  async getBrandRecentTweets(env, userId, handle) {
+    const cacheKey = `brand_tweets:${handle.toLowerCase()}`;
+    const highWaterKey = `high_water:tweets:${handle.toLowerCase()}`;
+    
+    // Get cached tweet IDs we've already processed
+    const cachedTweetIds = await env.TWITTER_BOT_KV.get(cacheKey);
+    const lastTweetId = await env.TWITTER_BOT_KV.get(highWaterKey);
+
+    // Fetch brand's recent tweets (last 7 days)
+    let url = `https://api.twitter.com/2/users/${userId}/tweets?max_results=10&tweet.fields=created_at,text&exclude=retweets,replies`;
+    
+    // We still want to check existing tweets for new likes/retweets, so don't use since_id here
+    // Instead, we limit to tweets from the last 7 days (Twitter's search limit anyway)
+
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${env.TWITTER_BEARER_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    this.logRateLimits(response);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Twitter API error (getBrandRecentTweets): ${response.status} - ${errorText}`);
+      return [];
+    }
+
+    const data = await response.json();
+    const tweets = data.data || [];
+
+    // Update high water mark for future reference
+    if (tweets.length > 0) {
+      const newestId = tweets[0].id;
+      await env.TWITTER_BOT_KV.put(highWaterKey, newestId);
+    }
+
+    return tweets;
   },
 
   // Get Twitter User ID from handle
@@ -301,23 +834,19 @@ export default {
     return data.data.id;
   },
 
-  // Search for recent mentions (with high water mark to avoid re-processing)
+  // Search for recent mentions
   async searchMentions(env, handle) {
-    // Get the high water mark (last processed tweet ID)
-    const highWaterKey = `high_water:${handle.toLowerCase()}`;
+    const highWaterKey = `high_water:mentions:${handle.toLowerCase()}`;
     const sinceId = await env.TWITTER_BOT_KV.get(highWaterKey);
     
-    // Twitter API v2 search endpoint
-    // Note: Basic tier allows recent search (last 7 days)
     const query = encodeURIComponent(`@${handle} -is:retweet`);
     let url = `https://api.twitter.com/2/tweets/search/recent?query=${query}&max_results=10&tweet.fields=author_id,created_at,text&expansions=author_id`;
     
-    // Only fetch tweets NEWER than our last processed tweet
     if (sinceId) {
       url += `&since_id=${sinceId}`;
-      console.log(`📍 Using high water mark: since_id=${sinceId}`);
+      console.log(`📍 Using mentions high water mark: since_id=${sinceId}`);
     } else {
-      console.log(`🆕 First run - will only process most recent 3 tweets and set high water mark`);
+      console.log(`🆕 First mentions run - will only process most recent 3 tweets`);
     }
 
     const response = await fetch(url, {
@@ -327,7 +856,34 @@ export default {
       }
     });
 
-    // Log rate limit headers for debugging
+    this.logRateLimits(response);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Twitter API error (searchMentions): ${response.status} - ${errorText}`);
+      if (response.status === 429) {
+        const rateReset = response.headers.get('x-rate-limit-reset');
+        if (rateReset) {
+          const resetTime = new Date(parseInt(rateReset) * 1000);
+          console.log(`⏰ Rate limit resets at: ${resetTime.toISOString()}`);
+        }
+      }
+      return { tweets: [], isFirstRun: !sinceId, newestId: null };
+    }
+
+    const data = await response.json();
+    const tweets = data.data || [];
+    const newestId = data.meta?.newest_id || (tweets.length > 0 ? tweets[0].id : null);
+    
+    return { 
+      tweets: !sinceId && tweets.length > 3 ? tweets.slice(0, 3) : tweets,
+      isFirstRun: !sinceId, 
+      newestId 
+    };
+  },
+
+  // Log rate limit headers
+  logRateLimits(response) {
     const rateLimit = response.headers.get('x-rate-limit-limit');
     const rateRemaining = response.headers.get('x-rate-limit-remaining');
     const rateReset = response.headers.get('x-rate-limit-reset');
@@ -335,58 +891,35 @@ export default {
       const resetDate = rateReset ? new Date(parseInt(rateReset) * 1000).toISOString() : 'unknown';
       console.log(`📊 Rate limit: ${rateRemaining}/${rateLimit} remaining, resets at ${resetDate}`);
     }
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`❌ Twitter API error (searchMentions): ${response.status} - ${errorText}`);
-      // If rate limited, log when it resets
-      if (response.status === 429 && rateReset) {
-        const resetTime = new Date(parseInt(rateReset) * 1000);
-        console.log(`⏰ Rate limit resets at: ${resetTime.toISOString()} (in ${Math.ceil((resetTime - new Date()) / 60000)} minutes)`);
-      }
-      return { tweets: [], isFirstRun: !sinceId, newestId: null };
-    }
-
-    const data = await response.json();
-    const tweets = data.data || [];
-    
-    // Get the newest tweet ID to update high water mark
-    const newestId = data.meta?.newest_id || (tweets.length > 0 ? tweets[0].id : null);
-    
-    return { 
-      tweets: !sinceId && tweets.length > 3 ? tweets.slice(0, 3) : tweets, // Limit first run to 3 tweets
-      isFirstRun: !sinceId, 
-      newestId 
-    };
   },
 
   // Update the high water mark after successful processing
-  async updateHighWaterMark(env, handle, newestId) {
+  async updateHighWaterMark(env, type, handle, newestId) {
     if (!newestId) return;
-    const highWaterKey = `high_water:${handle.toLowerCase()}`;
+    const highWaterKey = `high_water:${type}:${handle.toLowerCase()}`;
     await env.TWITTER_BOT_KV.put(highWaterKey, newestId);
-    console.log(`📍 Updated high water mark to: ${newestId}`);
+    console.log(`📍 Updated ${type} high water mark to: ${newestId}`);
   },
 
-  // Process a single tweet - returns { processed: boolean, success: boolean }
+  // Process a single tweet/engagement - returns { processed: boolean, success: boolean }
   async processTweet(env, tweet, eventType) {
     const tweetId = tweet.id;
     const authorId = tweet.author_id;
 
     // Check if already processed (belt-and-suspenders with high water mark)
-    const processedKey = `processed:${tweetId}`;
+    const processedKey = `processed:${eventType}:${tweetId}`;
     const isProcessed = await env.TWITTER_BOT_KV.get(processedKey);
     
     if (isProcessed) {
-      console.log(`⏭️ Skipping already processed tweet: ${tweetId}`);
+      console.log(`⏭️ Skipping already processed ${eventType}: ${tweetId}`);
       return { processed: false, success: false };
     }
 
     const tweetPreview = tweet.text?.substring(0, 50) || 'No text';
-    console.log(`🎉 Processing tweet ${tweetId} from user ${authorId}: "${tweetPreview}..."`);
+    console.log(`🎉 Processing ${eventType} ${tweetId} from user ${authorId}: "${tweetPreview}..."`);
 
     // Send reward event
-    const success = await this.sendRewardEvent(env, authorId, eventType, tweetId);
+    const success = await this.sendRewardEvent(env, authorId, eventType, tweetId, tweet);
 
     // Mark as processed (TTL 30 days to prevent re-processing)
     await env.TWITTER_BOT_KV.put(processedKey, JSON.stringify({
@@ -398,14 +931,10 @@ export default {
     return { processed: true, success };
   },
 
-  // Send reward event to Loyalteez Event Handler - returns true on success
-  // Uses Service Bindings if available (avoids 522 timeouts), otherwise falls back to HTTP
-  async sendRewardEvent(env, socialId, eventType, referenceId) {
-    // Use same payload format as Discord bot (loyalteez.js)
-    // Twitter users get a synthetic email: twitter_{userId}@loyalteez.app
+  // Send reward event to Loyalteez Event Handler
+  async sendRewardEvent(env, socialId, eventType, referenceId, tweet = {}) {
     const userEmail = `twitter_${socialId}@loyalteez.app`;
     
-    // Get the Twitter handle from config for authorization
     const config = await this.getBrandConfig(env);
     const twitterHandle = config?.twitterHandle;
 
@@ -413,13 +942,12 @@ export default {
       brandId: env.BRAND_ID,
       eventType: eventType,
       userEmail: userEmail,
-      // Use Twitter handle as the authorization (registered in Partner Portal)
-      // This validates: "mentions of @handle are valid engagement for this brand"
       twitterHandle: twitterHandle,
       metadata: {
         platform: 'twitter',
         twitter_user_id: socialId,
         tweet_id: referenceId,
+        original_tweet_id: tweet.liked_tweet_id || tweet.retweeted_tweet_id || null,
         timestamp: new Date().toISOString()
       }
     };
@@ -427,8 +955,7 @@ export default {
     // Try Service Binding first (preferred - avoids 522 timeouts)
     if (env.EVENT_HANDLER) {
       try {
-        console.log(`📤 Sending event via Service Binding...`);
-        // Use recognized API hostname so event-handler routes correctly
+        console.log(`📤 Sending ${eventType} event via Service Binding...`);
         const serviceBindingUrl = 'https://api.loyalteez.app/loyalteez-api/manual-event';
         const request = new Request(serviceBindingUrl, {
           method: 'POST',
@@ -452,17 +979,16 @@ export default {
           throw new Error(data.error || `API returned ${response.status}`);
         }
 
-        console.log(`✅ Event sent successfully via Service Binding:`, data.message || '');
+        console.log(`✅ ${eventType} event sent successfully via Service Binding:`, data.message || '');
         return true;
       } catch (error) {
         console.error('Service Binding failed, falling back to HTTP:', error.message);
-        // Fall through to HTTP fetch
       }
     }
 
     // Fallback to HTTP fetch
     try {
-      console.log(`📤 Sending event via HTTP to ${env.LOYALTEEZ_API_URL}/loyalteez-api/manual-event...`);
+      console.log(`📤 Sending ${eventType} event via HTTP to ${env.LOYALTEEZ_API_URL}/loyalteez-api/manual-event...`);
       const response = await fetch(`${env.LOYALTEEZ_API_URL}/loyalteez-api/manual-event`, {
         method: 'POST',
         headers: { 
@@ -479,10 +1005,10 @@ export default {
       }
       
       const result = await response.json().catch(() => ({}));
-      console.log(`✅ Event sent successfully via HTTP:`, result.message || '');
+      console.log(`✅ ${eventType} event sent successfully via HTTP:`, result.message || '');
       return true;
     } catch (error) {
-      console.error(`❌ Failed to send reward event:`, error.message || error);
+      console.error(`❌ Failed to send ${eventType} reward event:`, error.message || error);
       return false;
     }
   }

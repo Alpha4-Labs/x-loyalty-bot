@@ -6,19 +6,21 @@ A serverless Twitter integration built on Cloudflare Workers that rewards commun
 
 - **Serverless Architecture**: Runs entirely on Cloudflare Workers (no paid VPS required).
 - **Automatic Polling**: Scheduled triggers check for new engagements (hourly on free tier, more frequent on paid).
-- **Mention Tracking**: Rewards users who mention your brand's Twitter handle.
-- **Smart Deduplication**: High water mark + KV storage ensures each tweet is only rewarded once.
+- **Multi-Engagement Support**: Rewards users for mentions, replies, likes, and retweets.
+- **Smart Deduplication**: High water mark + KV storage ensures each engagement is only rewarded once.
 - **Partner Portal Integration**: Twitter handle configured in Partner Portal (single source of truth).
 - **Instant Rewards**: Calls Loyalteez Event Handler to mint tokens upon detection.
 
-## Current Engagement Types
+## Supported Engagement Types
 
-| Event Type | Description | Status |
-|------------|-------------|--------|
-| `tweet_mention` | User mentions @YourBrand in a tweet | ✅ Implemented |
-| `tweet_reply` | User replies to your tweets | 🚧 Planned |
-| `tweet_like` | User likes your tweets | 🚧 Planned (requires elevated API) |
-| `tweet_retweet` | User retweets your content | 🚧 Planned (requires elevated API) |
+| Event Type | Description | Status | API Tier Required |
+|------------|-------------|--------|-------------------|
+| `tweet_mention` | User mentions @YourBrand in a tweet | ✅ Implemented | Basic ($100/mo) |
+| `tweet_reply` | User replies to your tweets | ✅ Implemented | Basic ($100/mo) |
+| `tweet_like` | User likes your tweets | ✅ Implemented | Pro ($5,000/mo)* |
+| `tweet_retweet` | User retweets your content | ✅ Implemented | Pro ($5,000/mo)* |
+
+> **\*** Likes and retweets require Twitter API Pro tier OR OAuth 2.0 User Context authentication. The Basic tier will gracefully skip these with an informative error message.
 
 ## Prerequisites
 
@@ -43,7 +45,7 @@ npm install
 4. Generate a **Bearer Token** (easiest for read-only operations).
 5. Copy the Bearer Token securely.
 
-> **⚠️ Free Tier Limitations**: The free tier is very restrictive - only **1 request per 15 minutes** and **100 tweets/month**. Use hourly polling on free tier. For production use, consider Basic tier ($100/month) which allows 10,000 tweets/month.
+> **⚠️ Free Tier Limitations**: The free tier is very restrictive - only **1 request per 15 minutes** and **100 tweets/month**. Use daily polling on free tier. For production use, consider Basic tier ($100/month) which allows 10,000 tweets/month.
 
 ### 3. Create KV Namespace
 
@@ -99,13 +101,17 @@ npx wrangler secret put SUPABASE_PUBLISH_KEY
 npm run deploy
 ```
 
-The bot will automatically start polling every 15 minutes.
+The bot will automatically start polling according to your configured schedule.
 
 ### 8. Configure Events in Partner Portal
 
 1. Go to **Partner Portal** → **Settings** → **Points Distribution**.
-2. Click **Add Event** and select **Tweet Mention** (or other Twitter events).
-3. Configure reward amount, cooldowns, and limits.
+2. Click **Add Event** and select Twitter events:
+   - **Tweet Mention** - Rewards for @mentions
+   - **Tweet Reply** - Rewards for replies to your tweets
+   - **Tweet Like** - Rewards for likes (Pro tier)
+   - **Tweet Retweet** - Rewards for retweets (Pro tier)
+3. Configure reward amounts, cooldowns, and limits for each event.
 4. Save the configuration.
 
 ## How It Works
@@ -113,7 +119,7 @@ The bot will automatically start polling every 15 minutes.
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │  Twitter API    │────▶│  Cloudflare      │────▶│  Loyalteez      │
-│  (Mentions)     │     │  Worker (Cron)   │     │  Event Handler  │
+│  (Engagements)  │     │  Worker (Cron)   │     │  Event Handler  │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
         │                       │                        │
         │                       ▼                        │
@@ -129,12 +135,18 @@ The bot will automatically start polling every 15 minutes.
                         └──────────────────┘
 ```
 
-1. **Cron Trigger** (every 15 mins): Worker wakes up.
+### Polling Flow
+
+1. **Cron Trigger**: Worker wakes up at scheduled interval.
 2. **Load Config**: Fetches Twitter handle from Supabase (Partner Portal).
-3. **Fetch Mentions**: Queries Twitter API for mentions since last poll (high water mark).
-4. **Deduplication**: Skips already-processed tweets using KV store.
+3. **Fetch Engagements**: Queries Twitter API for each engagement type:
+   - **Mentions**: Search API with `@handle` query
+   - **Replies**: Search API with `to:handle is:reply` query
+   - **Likes**: User lookup on brand's tweets (Pro tier)
+   - **Retweets**: User lookup on brand's tweets (Pro tier)
+4. **Deduplication**: Skips already-processed engagements using KV store.
 5. **Reward**: Sends event to Loyalteez Event Handler for token minting.
-6. **Record**: Updates high water mark and stores tweet ID in KV.
+6. **Record**: Updates high water mark and stores engagement ID in KV.
 
 ## API Endpoints
 
@@ -143,16 +155,30 @@ The bot will automatically start polling every 15 minutes.
 | `/` | GET | Service info and available endpoints |
 | `/health` | GET | Health check with config status |
 | `/config` | GET | Debug endpoint showing configuration |
-| `/trigger` | POST | Manually trigger a poll (for testing) |
-| `/reset` | POST | Reset high water mark (start fresh) |
+| `/trigger` | POST | Poll all engagement types |
+| `/trigger/mentions` | POST | Poll mentions only |
+| `/trigger/replies` | POST | Poll replies only |
+| `/trigger/likes` | POST | Poll likes only (Pro tier) |
+| `/trigger/retweets` | POST | Poll retweets only (Pro tier) |
+| `/reset` | POST | Reset all high water marks (start fresh) |
 
-### Example: Manual Trigger
+### Example: Manual Trigger (All Engagements)
 
 ```bash
 curl -X POST https://your-worker.workers.dev/trigger
 ```
 
-### Example: Reset High Water Mark
+### Example: Trigger Specific Type
+
+```bash
+# Poll only mentions
+curl -X POST https://your-worker.workers.dev/trigger/mentions
+
+# Poll only replies
+curl -X POST https://your-worker.workers.dev/trigger/replies
+```
+
+### Example: Reset High Water Marks
 
 ```bash
 curl -X POST https://your-worker.workers.dev/reset
@@ -180,22 +206,34 @@ npx wrangler tail
 
 This streams real-time logs from your worker.
 
-### Test with a Mention
+### Test Each Engagement Type
 
+**Mentions:**
 1. Configure your Twitter handle in Partner Portal.
 2. Have a test account tweet: `"Testing @YourBrand integration!"`
-3. Either wait for the next cron run (up to 15 mins) or trigger manually:
-   ```bash
-   curl -X POST https://your-worker.workers.dev/trigger
-   ```
-4. Check logs for processing confirmation.
+3. Trigger manually: `curl -X POST https://your-worker.workers.dev/trigger/mentions`
+
+**Replies:**
+1. Post a tweet from your brand account.
+2. Have a test account reply to that tweet.
+3. Trigger manually: `curl -X POST https://your-worker.workers.dev/trigger/replies`
+
+**Likes (Pro tier):**
+1. Post a tweet from your brand account.
+2. Have a test account like that tweet.
+3. Trigger manually: `curl -X POST https://your-worker.workers.dev/trigger/likes`
+
+**Retweets (Pro tier):**
+1. Post a tweet from your brand account.
+2. Have a test account retweet that tweet.
+3. Trigger manually: `curl -X POST https://your-worker.workers.dev/trigger/retweets`
 
 ### First Run Behavior
 
 On first deployment (no high water mark), the bot will:
-- Process only the **3 most recent mentions** (to avoid mass-processing old tweets)
-- Set a high water mark for future polls
-- Subsequent polls only fetch tweets newer than the high water mark
+- Process only the **3 most recent engagements** of each type (to avoid mass-processing old content)
+- Set high water marks for future polls
+- Subsequent polls only fetch engagements newer than the high water marks
 
 ## Customization
 
@@ -208,7 +246,7 @@ Edit `wrangler.toml`:
 crons = ["*/5 * * * *"]  # Every 5 minutes
 ```
 
-> **Warning**: More frequent polling consumes Twitter API quota faster (10 requests per 15 mins on Basic tier).
+> **Warning**: More frequent polling consumes Twitter API quota faster.
 
 ### Custom Domain
 
@@ -225,8 +263,10 @@ zone_name = "your-domain.com"
 ```
 twitter-loyalty-bot/
 ├── src/
-│   └── index.js          # Main worker logic
+│   ├── index.js          # Single-tenant worker (all engagement types)
+│   └── router.js         # Multi-tenant router (for platform deployment)
 ├── wrangler.toml         # Your config (gitignored)
+├── wrangler.router.toml  # Multi-tenant router config
 ├── wrangler.example.toml # Template config
 ├── package.json
 ├── .gitignore
@@ -251,14 +291,19 @@ twitter-loyalty-bot/
 - Wait 15 minutes for the rate limit to reset
 - Consider reducing poll frequency or upgrading to Pro tier
 
+### "403 - Elevated API access required"
+- Likes and retweets tracking requires Twitter API Pro tier ($5,000/mo)
+- Alternatively, implement OAuth 2.0 User Context authentication
+- Basic tier ($100/mo) supports mentions and replies only
+
 ### No rewards appearing
 - Verify `BRAND_ID` matches your Partner Portal wallet
-- Check that `tweet_mention` event is configured in Partner Portal
+- Check that the appropriate event type is configured in Partner Portal
 - View logs with `npx wrangler tail`
 
 ### High water mark issues
-- Use `POST /reset` to clear the high water mark
-- Next poll will be treated as first run (processes 3 most recent tweets)
+- Use `POST /reset` to clear all high water marks
+- Next poll will be treated as first run (processes 3 most recent engagements per type)
 
 ## Security Notes
 
@@ -269,23 +314,42 @@ twitter-loyalty-bot/
 
 ## Rate Limits & Costs
 
-| Twitter API Tier | Monthly Cost | Requests/15min | Monthly Tweets | Recommended Polling |
-|------------------|--------------|----------------|----------------|---------------------|
-| **Free** | $0 | **1** | **100** | Daily (`0 12 * * *`) |
-| **Basic** | $100/mo | 10 | 10,000 | Every 15 min (`*/15 * * * *`) |
-| **Pro** | $5,000/mo | 450 | 1,000,000 | Every 5 min |
+| Twitter API Tier | Monthly Cost | Requests/15min | Monthly Tweets | Supported Features | Recommended Polling |
+|------------------|--------------|----------------|----------------|-------------------|---------------------|
+| **Free** | $0 | **1** | **100** | Mentions only | Daily (`0 12 * * *`) |
+| **Basic** | $100/mo | 10 | 10,000 | Mentions, Replies | Every 15 min (`*/15 * * * *`) |
+| **Pro** | $5,000/mo | 450 | 1,000,000 | All features | Every 5 min |
 
-> **⚠️ Important**: The free tier is extremely limited. With only 1 request per 15 minutes and 100 tweets/month, use **hourly polling** to avoid rate limits. For production, upgrade to Basic tier.
+> **⚠️ Important**: The free tier is extremely limited. With only 1 request per 15 minutes and 100 tweets/month, use **daily polling** to avoid rate limits. For production, upgrade to Basic tier minimum.
 
-### Free Tier Math
-- 100 tweets/month ÷ ~10 tweets/poll = ~10 polls before monthly cap
-- Daily polling = 30 polls/month (but only counts if tweets are returned)
-- **Recommendation**: Use daily polling for demos, upgrade to Basic for production
+### API Endpoint Requirements
+
+| Endpoint | Tier Required | Notes |
+|----------|---------------|-------|
+| `GET /2/tweets/search/recent` | Basic | Mentions & Replies |
+| `GET /2/users/by/username/:username` | Basic | User ID lookup |
+| `GET /2/users/:id/tweets` | Basic | Brand's recent tweets |
+| `GET /2/tweets/:id/liking_users` | Pro | Like tracking |
+| `GET /2/tweets/:id/retweeted_by` | Pro | Retweet tracking |
+
+## Architecture Options
+
+### Single-Tenant (index.js)
+- One worker per brand
+- Simpler setup for individual deployments
+- Uses `wrangler.toml` for configuration
+
+### Multi-Tenant Router (router.js)
+- Single worker handles ALL brands
+- Uses subdomain-based routing: `{brand}.loyalteez.app`
+- Credentials stored encrypted in KV
+- Uses `wrangler.router.toml` for configuration
 
 ## Related Documentation
 
 - [Loyalteez Developer Docs](https://developer.loyalteez.app)
 - [Twitter API v2 Documentation](https://developer.twitter.com/en/docs/twitter-api)
+- [Twitter API Access Levels](https://developer.twitter.com/en/docs/twitter-api/getting-started/about-twitter-api)
 - [Cloudflare Workers Docs](https://developers.cloudflare.com/workers/)
 
 ## License
