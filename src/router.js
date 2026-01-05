@@ -116,6 +116,16 @@ const CORS_HEADERS = {
 // MAIN WORKER
 // ============================================
 
+// Map of reserved subdomains to their Cloudflare Pages project names
+// These get proxied to their respective Pages deployments
+const PAGES_PROXY_MAP = {
+  'partner': 'partner-frontend',
+  'partner-testnet': 'partner-frontend-testnet', 
+  'perk-market': 'perk-market-frontend',
+  'perk-market-testnet': 'perk-market-frontend-testnet',
+  'admin': 'admin-portal',
+};
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') {
@@ -128,7 +138,38 @@ export default {
     // Extract brand from subdomain
     const brandSlug = this.extractBrandSlug(hostname);
     
+    // If it's a reserved subdomain, proxy to the appropriate Pages deployment
     if (!brandSlug) {
+      const subdomain = hostname.split('.')[0];
+      
+      // Check if we should proxy to a Pages deployment
+      const pagesProject = PAGES_PROXY_MAP[subdomain];
+      if (pagesProject) {
+        // Proxy to Cloudflare Pages - use the pages.dev domain
+        const pagesUrl = new URL(request.url);
+        pagesUrl.hostname = `${pagesProject}.pages.dev`;
+        
+        console.log(`🔀 Proxying ${subdomain}.loyalteez.app to ${pagesProject}.pages.dev`);
+        
+        // Forward the request to Pages
+        const proxyResponse = await fetch(pagesUrl.toString(), {
+          method: request.method,
+          headers: request.headers,
+          body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
+          redirect: 'manual', // Don't follow redirects, let the client handle them
+        });
+        
+        // Return the proxied response with CORS headers
+        const response = new Response(proxyResponse.body, {
+          status: proxyResponse.status,
+          statusText: proxyResponse.statusText,
+          headers: proxyResponse.headers,
+        });
+        
+        return response;
+      }
+      
+      // Not a proxied subdomain - return router info
       return this.jsonResponse({
         service: 'twitter-loyalty-router',
         version: '2.0.0',
