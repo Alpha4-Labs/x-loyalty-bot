@@ -251,7 +251,28 @@ export default {
       const parts = hostname.split('.');
       if (parts.length >= 3) {
         const slug = parts[0];
-        if (['api', 'www', 'app', 'portal', 'x-demo'].includes(slug)) {
+        // Reserved subdomains - these are NOT brand slugs
+        // They have their own dedicated services/pages
+        const RESERVED_SUBDOMAINS = [
+          'api',              // Main API
+          'www',              // Website
+          'app',              // Main app
+          'portal',           // Legacy portal
+          'partner',          // Partner Portal
+          'partner-testnet',  // Partner Portal testnet
+          'perk-market',      // Perk Market
+          'perk-market-testnet', // Perk Market testnet
+          'x-demo',           // Twitter demo
+          'x-deploy',         // Twitter deployment service
+          'discord-bot',      // Old Discord bot
+          'loyalteez-official-discord-bot', // New Discord bot
+          'farcaster-bot',    // Farcaster bot
+          'shopify',          // Shopify app
+          'admin',            // Admin portal
+          'docs',             // Documentation
+          'status',           // Status page
+        ];
+        if (RESERVED_SUBDOMAINS.includes(slug)) {
           return null;
         }
         return slug;
