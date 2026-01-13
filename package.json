@@ -5,9 +5,10 @@
   "type": "module",
   "main": "src/index.js",
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --bail=0",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage --bail=0",
+    "test:errors": "vitest run --bail=0 --reporter=verbose 2>&1 | Select-String -Pattern 'FAIL|Error|AssertionError' -Context 2,5",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "tail": "wrangler tail"
