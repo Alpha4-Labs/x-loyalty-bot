@@ -5,7 +5,9 @@
   "type": "module",
   "main": "src/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "tail": "wrangler tail"
@@ -16,6 +18,11 @@
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260113.0",
+    "@vitest/coverage-v8": "^4.0.17",
+    "miniflare": "^4.20260111.0",
+    "undici": "^7.18.2",
+    "vitest": "^4.0.17",
     "wrangler": "^3.0.0"
   }
 }

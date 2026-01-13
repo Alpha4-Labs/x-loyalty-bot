@@ -2,9 +2,14 @@
  * Twitter/X Loyalty Bot - Cloudflare Worker
  * 
  * Polls Twitter API for brand engagements and rewards users with LTZ tokens.
- * Supports: mentions, replies, likes, and retweets.
+ * Supports: mentions, replies, likes, retweets, quotes, hashtags, and thread participation.
  * Reads configuration from Supabase (Partner Portal) for single source of truth.
  */
+
+import { pollQuoteTweets } from './polling/quotes.js';
+import { pollHashtagCampaigns } from './polling/hashtags.js';
+import { pollThreadParticipation } from './polling/threads.js';
+import { recordTwitterEngagement } from './services/streak-client.js';
 
 // CORS headers for health checks from browser
 const corsHeaders = {
@@ -18,7 +23,11 @@ const EVENT_TYPES = {
   MENTION: 'tweet_mention',
   REPLY: 'tweet_reply',
   LIKE: 'tweet_like',
-  RETWEET: 'tweet_retweet'
+  RETWEET: 'tweet_retweet',
+  QUOTE: 'tweet_quote',
+  HASHTAG: 'tweet_hashtag',
+  THREAD_REPLY: 'tweet_thread_reply',
+  DAILY_ENGAGEMENT: 'twitter_daily_engagement'
 };
 
 export default {
@@ -68,7 +77,7 @@ export default {
     // Trigger specific engagement type
     if (url.pathname.startsWith('/trigger/') && request.method === 'POST') {
       const eventType = url.pathname.replace('/trigger/', '');
-      const validTypes = ['mentions', 'replies', 'likes', 'retweets'];
+      const validTypes = ['mentions', 'replies', 'likes', 'retweets', 'quotes', 'hashtags', 'threads'];
       if (!validTypes.includes(eventType)) {
         return new Response(JSON.stringify({ 
           success: false, 
@@ -151,6 +160,10 @@ Supported Engagement Types:
 - tweet_reply: User replies to your tweets  
 - tweet_like: User likes your tweets (requires elevated API)
 - tweet_retweet: User retweets your content (requires elevated API)
+- tweet_quote: User quote-tweets your content
+- tweet_hashtag: User uses brand hashtag in campaign
+- tweet_thread_reply: User participates in your tweet threads
+- twitter_daily_engagement: First engagement of the day (streak tracking)
 
 Endpoints:
 - GET  /health           - Health check
@@ -160,6 +173,9 @@ Endpoints:
 - POST /trigger/replies  - Poll replies only
 - POST /trigger/likes    - Poll likes only (elevated API)
 - POST /trigger/retweets - Poll retweets only (elevated API)
+- POST /trigger/quotes   - Poll quote tweets only
+- POST /trigger/hashtags - Poll hashtag campaigns only
+- POST /trigger/threads  - Poll thread participation only
 - POST /reset            - Reset all high water marks
 `, { 
       status: 200,
@@ -242,6 +258,12 @@ Endpoints:
         return await this.pollTwitterLikes(env);
       case 'retweets':
         return await this.pollTwitterRetweets(env);
+      case 'quotes':
+        return await this.pollTwitterQuotes(env);
+      case 'hashtags':
+        return await this.pollTwitterHashtags(env);
+      case 'threads':
+        return await this.pollTwitterThreads(env);
       default:
         throw new Error(`Unknown engagement type: ${type}`);
     }
@@ -253,7 +275,10 @@ Endpoints:
       mentions: { found: 0, rewarded: 0, errors: [] },
       replies: { found: 0, rewarded: 0, errors: [] },
       likes: { found: 0, rewarded: 0, errors: [] },
-      retweets: { found: 0, rewarded: 0, errors: [] }
+      retweets: { found: 0, rewarded: 0, errors: [] },
+      quotes: { found: 0, rewarded: 0, errors: [] },
+      hashtags: { found: 0, rewarded: 0, errors: [] },
+      threads: { found: 0, rewarded: 0, errors: [] }
     };
 
     // Check prerequisites
@@ -306,6 +331,33 @@ Endpoints:
     } catch (error) {
       console.error(`❌ Retweets poll failed:`, error.message);
       results.retweets.errors.push(error.message);
+    }
+
+    // Poll quote tweets (Basic tier)
+    try {
+      const quoteResult = await this.pollTwitterQuotes(env);
+      results.quotes = { found: quoteResult.quotesFound, rewarded: quoteResult.rewardsIssued, errors: quoteResult.errors };
+    } catch (error) {
+      console.error(`❌ Quote tweets poll failed:`, error.message);
+      results.quotes.errors.push(error.message);
+    }
+
+    // Poll hashtag campaigns (Basic tier)
+    try {
+      const hashtagResult = await this.pollTwitterHashtags(env);
+      results.hashtags = { found: hashtagResult.hashtagsFound, rewarded: hashtagResult.rewardsIssued, errors: hashtagResult.errors };
+    } catch (error) {
+      console.error(`❌ Hashtag campaigns poll failed:`, error.message);
+      results.hashtags.errors.push(error.message);
+    }
+
+    // Poll thread participation (Basic tier)
+    try {
+      const threadResult = await this.pollTwitterThreads(env);
+      results.threads = { found: threadResult.threadRepliesFound, rewarded: threadResult.rewardsIssued, errors: threadResult.errors };
+    } catch (error) {
+      console.error(`❌ Thread participation poll failed:`, error.message);
+      results.threads.errors.push(error.message);
     }
 
     console.log(`✅ Full engagement poll complete:`, JSON.stringify(results, null, 2));
@@ -708,6 +760,74 @@ Endpoints:
     }
   },
 
+  // ============================================
+  // QUOTE TWEETS POLLING (Basic Tier)
+  // ============================================
+
+  async pollTwitterQuotes(env) {
+    try {
+      const config = await this.getBrandConfig(env);
+      if (!config || !config.twitterHandle) {
+        return { quotesFound: 0, rewardsIssued: 0, rewardsFailed: 0, errors: ["Twitter handle not configured"] };
+      }
+
+      // Get user ID for config
+      const userId = await this.getUserId(env, config.twitterHandle);
+      if (!userId) {
+        return { quotesFound: 0, rewardsIssued: 0, rewardsFailed: 0, errors: ["Could not find user ID"] };
+      }
+
+      config.twitterUserId = userId;
+      return await pollQuoteTweets(env, config);
+    } catch (error) {
+      return { quotesFound: 0, rewardsIssued: 0, rewardsFailed: 0, errors: [error.message] };
+    }
+  },
+
+  // ============================================
+  // HASHTAG CAMPAIGNS POLLING (Basic Tier)
+  // ============================================
+
+  async pollTwitterHashtags(env) {
+    try {
+      const config = await this.getBrandConfig(env);
+      if (!config || !config.twitterHandle) {
+        return { hashtagsFound: 0, rewardsIssued: 0, rewardsFailed: 0, errors: ["Twitter handle not configured"] };
+      }
+
+      // Get hashtag campaigns from config
+      config.hashtagCampaigns = config.configMetadata?.hashtag_campaigns || [];
+      
+      return await pollHashtagCampaigns(env, config);
+    } catch (error) {
+      return { hashtagsFound: 0, rewardsIssued: 0, rewardsFailed: 0, errors: [error.message] };
+    }
+  },
+
+  // ============================================
+  // THREAD PARTICIPATION POLLING (Basic Tier)
+  // ============================================
+
+  async pollTwitterThreads(env) {
+    try {
+      const config = await this.getBrandConfig(env);
+      if (!config || !config.twitterHandle) {
+        return { threadRepliesFound: 0, rewardsIssued: 0, rewardsFailed: 0, errors: ["Twitter handle not configured"] };
+      }
+
+      // Get user ID for config
+      const userId = await this.getUserId(env, config.twitterHandle);
+      if (!userId) {
+        return { threadRepliesFound: 0, rewardsIssued: 0, rewardsFailed: 0, errors: ["Could not find user ID"] };
+      }
+
+      config.twitterUserId = userId;
+      return await pollThreadParticipation(env, config);
+    } catch (error) {
+      return { threadRepliesFound: 0, rewardsIssued: 0, rewardsFailed: 0, errors: [error.message] };
+    }
+  },
+
   // Get users who retweeted a specific tweet
   async getTweetRetweeters(env, tweetId, handle) {
     const cacheKey = `retweeters_checked:${tweetId}`;
@@ -918,8 +1038,12 @@ Endpoints:
     const tweetPreview = tweet.text?.substring(0, 50) || 'No text';
     console.log(`🎉 Processing ${eventType} ${tweetId} from user ${authorId}: "${tweetPreview}..."`);
 
-    // Send reward event
-    const success = await this.sendRewardEvent(env, authorId, eventType, tweetId, tweet);
+    // Record engagement for streak (passive streak tracking)
+    const streakResult = await recordTwitterEngagement(env, authorId, 'engagement');
+    console.log(`🔥 Streak: ${streakResult.currentStreak} days, Multiplier: ${streakResult.multiplier}x`);
+
+    // Send reward event (with streak multiplier in metadata)
+    const success = await this.sendRewardEvent(env, authorId, eventType, tweetId, tweet, streakResult);
 
     // Mark as processed (TTL 30 days to prevent re-processing)
     await env.TWITTER_BOT_KV.put(processedKey, JSON.stringify({
@@ -932,7 +1056,7 @@ Endpoints:
   },
 
   // Send reward event to Loyalteez Event Handler
-  async sendRewardEvent(env, socialId, eventType, referenceId, tweet = {}) {
+  async sendRewardEvent(env, socialId, eventType, referenceId, tweet = {}, streakResult = null) {
     const userEmail = `twitter_${socialId}@loyalteez.app`;
     
     const config = await this.getBrandConfig(env);
@@ -948,7 +1072,11 @@ Endpoints:
         twitter_user_id: socialId,
         tweet_id: referenceId,
         original_tweet_id: tweet.liked_tweet_id || tweet.retweeted_tweet_id || null,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        ...(streakResult && {
+          streak_multiplier: streakResult.multiplier,
+          current_streak: streakResult.currentStreak
+        })
       }
     };
 
